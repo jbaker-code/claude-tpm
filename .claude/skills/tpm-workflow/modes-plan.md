@@ -221,6 +221,9 @@ tpm workflow compose --role builder \
   [--round 1 --model <model> --project-root "$(pwd)" --out spawn-prompt-builder-r1.md]
 ```
 
+`--out` is resolved against `--phase-dir`, so a bare name lands in the phase folder; a path that
+escapes the phase folder is refused.
+
 Then **lint** the finalized plan/charter/prompt (the poka-yoke that makes token-saving partial reads
 safe — you grep the template, the lint catches the gaps):
 

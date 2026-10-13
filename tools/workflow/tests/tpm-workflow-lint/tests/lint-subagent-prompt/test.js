@@ -520,6 +520,47 @@ check('L4 fill-sentinel: a mixed-case {{Fill_Me}} marker is also flagged (contro
   r.code === 1 && /fill-sentinel/.test(r.stdout), `code=${r.code}\n${r.stdout}`);
 
 // ---------------------------------------------------------------------------
+// #1182 backstop — phase-location-matches-marker: dirname(--file) must equal the
+// <!-- tpm-workflow-spawn phase="..." --> marker's phase folder.
+// ---------------------------------------------------------------------------
+{
+  const phaseDir = path.join(SCRATCH, 'phase-a');
+  const otherDir = path.join(SCRATCH, 'phase-b');
+  fs.mkdirSync(phaseDir, { recursive: true });
+  fs.mkdirSync(otherDir, { recursive: true });
+  const marked = ph => `<!-- tpm-workflow-spawn phase="${ph}" role="builder" -->\n# Plan\nNo fill markers here.\n`;
+  // PASS on match (absolute marker, absolute --file)
+  const okFile = path.join(phaseDir, 'spawn.md');
+  fs.writeFileSync(okFile, marked(phaseDir));
+  r = runLint(['--file', okFile, '--sentinels-only']);
+  check('#1182 phase-location: file inside its declared phase folder passes (exit 0)', r.code === 0, `code=${r.code}\n${r.stdout}`);
+  // PASS on match with a cwd-relative marker + relative --file
+  const rel = path.relative(process.cwd(), phaseDir);
+  fs.writeFileSync(okFile, marked(rel));
+  r = runLint(['--file', path.join(rel, 'spawn.md'), '--sentinels-only']);
+  check('#1182 phase-location: relative marker + relative --file compare equal (exit 0)', r.code === 0, `code=${r.code}\n${r.stdout}`);
+  // FAIL on mismatch, naming both
+  const badFile = path.join(otherDir, 'spawn.md');
+  fs.writeFileSync(badFile, marked(phaseDir));
+  r = runLint(['--file', badFile, '--sentinels-only']);
+  check('#1182 phase-location: file in the WRONG folder FAILs naming both paths (exit 1)',
+    r.code === 1 && /phase-location-matches-marker/.test(r.stdout) && r.stdout.includes(otherDir) && r.stdout.includes(path.basename(phaseDir)),
+    `code=${r.code}\n${r.stdout}`);
+  // SKIP: no marker
+  const noMarker = path.join(otherDir, 'nomarker.md');
+  fs.writeFileSync(noMarker, '# Plan\nNo marker.\n');
+  r = runLint(['--file', noMarker, '--sentinels-only']);
+  check('#1182 phase-location: marker-less file skips the check (exit 0)', r.code === 0 && !/phase-location/.test(r.stdout), `code=${r.code}\n${r.stdout}`);
+  // SKIP: stdin (no --file) with a mismatching marker must not crash or FAIL on this check
+  try {
+    const out = execFileSync(process.execPath, [LINT, '--sentinels-only', '--verbose'], { input: marked('dev/nowhere/x'), encoding: 'utf8' });
+    check('#1182 phase-location: stdin input skips the check (no crash)', !/phase-location/.test(out), out);
+  } catch (e) {
+    check('#1182 phase-location: stdin input skips the check (no crash)', !/phase-location/.test(String(e.stdout)), String(e.stdout) + String(e.stderr));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extra — --help exits 0.
 // ---------------------------------------------------------------------------
 r = runLint(['--help']);

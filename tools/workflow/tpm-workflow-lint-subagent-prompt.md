@@ -121,6 +121,10 @@ their blocks.
 - `verifier-hard-rule` — under `--verifier`, body contains `HARD RULE` **and** a verdict-not-repair phrase (`verdict,` / `do not fix`/`repair`). The retired "never touch the live system" wording no longer satisfies it.
 - `bug-fixer-names-verdict` — under `--bug-fixer`, body names the verdict file it fixes (`verifier-r<N>-v<M>-verdict.md`, or the `--verdict` path).
 
+**Location check** (applies in every mode, but only with `--file` and a `<!-- tpm-workflow-spawn phase="…" -->` marker in the body; otherwise skipped):
+
+- `phase-location-matches-marker` — the linted file must sit in the folder its marker's `phase="…"` names. Catches a spawn prompt written to the wrong place (#1182). The marker path is resolved against cwd, so run from the project root.
+
 **Sentinel checks** (always apply):
 
 - `fill-sentinel` — no surviving `{{PLACEHOLDER}}` (names the offending placeholder).

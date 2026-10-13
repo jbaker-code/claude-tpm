@@ -71,7 +71,8 @@ Reference the tools by their promoted path (`%TPM_HOME%/tools/workflow/…`); a 
    --phase-dir <dir> --plan plan.md --charter charter-<role>.md [--round N --model <m>
    --project-root "$(pwd)" --out spawn-prompt-<role>-r<N>.md]`. Emits the working-folder line, the
    read-order (charter THEN plan), the env-source ritual, constraints, and return shape — you supply
-   only the one `{{TASK_CONTEXT}}` fill.
+   only the one `{{TASK_CONTEXT}}` fill. `--out` is resolved against `--phase-dir` (not cwd): a bare name
+   lands in the phase folder, and a path that escapes it is refused (exit 2).
 4. **Lint BEFORE the Agent call** — `tpm workflow lint --file
    spawn-prompt-<role>-r<N>.md --require-charter --charter-dir <dir> [--verifier] [--resume]`. Exits
    0 = PASS, 1 = FAIL with a per-check missing-directive list. Do NOT spawn on a FAIL. The lint

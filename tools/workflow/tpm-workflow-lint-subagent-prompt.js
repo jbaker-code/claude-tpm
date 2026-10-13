@@ -655,6 +655,47 @@ function buildCharterAndFilenameChecks(opts) {
 }
 
 // -----------------------------------------------------------------------------
+// #1182 backstop: the composed prompt carries <!-- tpm-workflow-spawn phase="..." -->.
+// The file being linted must live IN that phase folder; a mismatch means the spawn
+// prompt was written to the wrong place. Gated: only with --file AND a marker.
+// -----------------------------------------------------------------------------
+
+const SPAWN_MARKER_PHASE_RE = /<!--\s*tpm-workflow-spawn\b[^>]*?\bphase="([^"]+)"/;
+
+function realOrResolved(p) {
+  const r = path.resolve(p);
+  try { return fs.realpathSync(r); } catch (e) { return r; }
+}
+
+/** Extract the marker's phase value, or null when there is no marker. */
+function markerPhase(body) {
+  const m = (body || '').match(SPAWN_MARKER_PHASE_RE);
+  return m ? m[1] : null;
+}
+
+function buildPhaseLocationChecks(opts) {
+  const checks = [];
+  checks.push({
+    id: 'phase-location-matches-marker',
+    name: 'Linted file sits in the phase folder its tpm-workflow-spawn marker declares',
+    docPointer: '#1182 - a spawn prompt written to the wrong folder; marker phase="..." must equal dirname(--file)',
+    // SKIP cleanly: no --file (stdin) or no marker in the body.
+    applies: body => !!opts.file && markerPhase(body) !== null,
+    test: body => {
+      const phase = markerPhase(body);
+      if (phase === null || !opts.file) return true;
+      return realOrResolved(phase) === realOrResolved(path.dirname(path.resolve(opts.file)));
+    },
+    detail: body => {
+      const phase = markerPhase(body);
+      if (phase === null || !opts.file) return '';
+      return `file is in ${path.dirname(path.resolve(opts.file))} but its marker declares phase="${phase}" (${path.resolve(phase)}) - spawn prompt written to the wrong folder`;
+    },
+  });
+  return checks;
+}
+
+// -----------------------------------------------------------------------------
 
 function buildChecks(opts) {
   const checks = [];
@@ -664,6 +705,7 @@ function buildChecks(opts) {
   checks.push(...buildStructuralChecks());
   checks.push(...buildSentinelChecks(opts));
   checks.push(...buildCharterAndFilenameChecks(opts));
+  checks.push(...buildPhaseLocationChecks(opts));
   return checks;
 }
 

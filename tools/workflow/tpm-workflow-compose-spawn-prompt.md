@@ -129,7 +129,7 @@ The four required flags have no defaults — omit one and it fails loudly with e
 | `--model <name>` | | Named in a trailing `(Model for this spawn: … )` note. The Agent call still sets it. |
 | `--epic <label>` | | Epic/lineage label appended to the header (`… subagent of the <label>`). |
 | `--project-root <p>` | | If given, emits the step-zero env-source ritual with the task folder derived from `--phase-dir`. |
-| `--out <path>` | | Write to a file instead of stdout (a `Wrote spawn prompt to …` line goes to **stderr**). |
+| `--out <path>` | | Write to a file instead of stdout (a `Wrote spawn prompt to <absolute path>` line goes to **stderr**). A relative path is resolved against `--phase-dir`, not cwd: a bare name lands in the phase folder, `tmp/x.md` under it. A path that resolves outside the phase dir (absolute, `..` escape, or the phase dir itself) is refused: exit `2`, nothing written. Missing parent dirs are created. |
 | `--help` / `-h` | | Print the header docstring, exit 0. |
 
 ### The identity slug
@@ -218,7 +218,7 @@ tpm workflow compose --role verifier --phase-dir 'dev/epic/01-thing' \
   --plan plan.md --charter charter-verifier.md --round 1 --variant 2 \
   --model opus --epic 'demo epic' --project-root '/abs/root' --out composed-verifier.md
 ```
-stderr: `Wrote spawn prompt to composed-verifier.md`. The file contains the header
+stderr: `Wrote spawn prompt to /abs/root/dev/epic/01-thing/composed-verifier.md` (the bare `--out` name resolved into the phase folder). The file contains the header
 `You are a VERIFIER subagent of the demo epic.`, the env-source ritual block anchored at
 `cd '/abs/root'`, the `tmp/verifier-r1-v2/` scratch folder, the verifier return-shape
 (`your verdict to \`findings/verifier-r1-v2-verdict.md\` …`), and the trailing
@@ -229,10 +229,10 @@ stderr: `Wrote spawn prompt to composed-verifier.md`. The file contains the head
 ```bash
 tpm workflow compose --role builder --phase-dir 'dev/epic/01-thing' \
   --plan plan.md --charter charter-builder.md --out composed-raw.md
-tpm workflow lint --file composed-raw.md --sentinels-only
+tpm workflow lint --file dev/epic/01-thing/composed-raw.md --sentinels-only
 ```
 ```
-FAIL: 1 of 3 required directives missing:
+FAIL: 1 of 5 required directives missing:
   X  fill-sentinel
      No surviving FILL sentinel ({{PLACEHOLDER}})
      -> surviving placeholder(s): {{TASK_CONTEXT}}

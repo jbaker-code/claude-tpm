@@ -91,7 +91,8 @@ check('linter FLAGS the unfilled {{TASK_CONTEXT}} in the composed output (exit 1
 // prompt names charter-builder.md, so give the charter-file-present check a dir
 // that actually contains it.
 fs.writeFileSync(path.join(SCRATCH, 'charter-builder.md'), '# Charter\nDo it well.\n');
-const filled = out.replace('{{TASK_CONTEXT}}', 'Build the widget per the DoD table.');
+// phase-location-matches-marker (#1182 lint rule): the linted file must sit in the phase its marker declares, so point the marker at SCRATCH.
+const filled = out.replace('{{TASK_CONTEXT}}', 'Build the widget per the DoD table.').replace(/phase="[^"]*"/, `phase="${SCRATCH}"`);
 const filledPath = path.join(SCRATCH, 'composed-filled.md');
 fs.writeFileSync(filledPath, filled);
 r = run(LINT, ['--file', filledPath, '--sentinels-only', '--charter-dir', SCRATCH]);
@@ -216,7 +217,7 @@ check('non-bug-fixer role ignores --verdict (no verdict read-line)', r.code === 
 // (baseline before this round: it FAILed — no HARD RULE line was emitted).
 // ===========================================================================
 const verForLint = composeRole('verifier', ['--round', '1', '--variant', '1', '--project-root', '/abs/repo'])
-  .replace('{{TASK_CONTEXT}}', 'Verify the widget.');
+  .replace('{{TASK_CONTEXT}}', 'Verify the widget.').replace(/phase="[^"]*"/, `phase="${SCRATCH}"`);
 const verLintPath = path.join(SCRATCH, 'composed-verifier.md');
 fs.writeFileSync(verLintPath, verForLint);
 fs.writeFileSync(path.join(SCRATCH, 'charter-verifier.md'), '# Charter\nVerify well.\n');
@@ -257,6 +258,115 @@ check('...and the real tool does NOT (guard would fire red on the mutant)',
   const mutBf = run(noRulePath, ['--role', 'bug-fixer', '--phase-dir', PHASE, '--plan', 'plan.md', '--charter', 'charter-bug-fixer.md', '--verdict', VERDICT]).stdout;
   check('MUTANT without the append rule: the append-rule guard would go RED',
     mutBf.length > 0 && !/ADD your own section headed `## Bug-fixer r<N>`/.test(mutBf) && !/never overwrite or rewrite the existing HANDOFF/.test(mutBf), mutBf);
+}
+
+// ---------------------------------------------------------------------------
+// #1182 — --out resolves against --phase-dir (not cwd); escapes are refused.
+// ---------------------------------------------------------------------------
+{
+  const base = fs.mkdtempSync(path.join(SCRATCH, 'out-'));
+  const phase = path.join(base, 'phase');
+  const cwd = path.join(base, 'cwd');
+  fs.mkdirSync(phase); fs.mkdirSync(cwd);
+  const baseArgs = ['--role', 'builder', '--phase-dir', phase, '--plan', 'plan.md', '--charter', 'charter-builder.md'];
+  const runIn = (extra) => {
+    try {
+      const stdout = execFileSync('node', [COMPOSE, ...baseArgs, ...extra], { encoding: 'utf8', cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+      return { code: 0, stdout, stderr: '' };
+    } catch (e) { return { code: e.status == null ? -1 : e.status, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString() }; }
+  };
+
+  let o = runIn(['--out', 'sp.md']);
+  check('#1182 bare-basename --out exits 0', o.code === 0, o.stderr);
+  check('#1182 bare-basename --out lands in the phase folder', fs.existsSync(path.join(phase, 'sp.md')));
+  check('#1182 bare-basename --out does NOT land in cwd', !fs.existsSync(path.join(cwd, 'sp.md')));
+
+  o = runIn(['--out', 'tmp/sp2.md']);
+  check('#1182 tmp/-prefixed --out exits 0', o.code === 0, o.stderr);
+  check('#1182 tmp/-prefixed --out lands under the phase folder', fs.existsSync(path.join(phase, 'tmp', 'sp2.md')));
+  check('#1182 tmp/-prefixed --out does NOT land under cwd', !fs.existsSync(path.join(cwd, 'tmp')));
+
+  const outside = path.join(base, 'escaped.md');
+  o = runIn(['--out', outside]);
+  check('#1182 absolute --out outside phase dir exits non-zero', o.code !== 0, `code=${o.code}`);
+  check('#1182 absolute escape writes nothing', !fs.existsSync(outside));
+  check('#1182 escape error names the phase dir and the offending path', o.stderr.includes(phase) && o.stderr.includes(outside), o.stderr);
+
+  o = runIn(['--out', '../escaped2.md']);
+  check('#1182 ../ --out escape exits non-zero', o.code !== 0, `code=${o.code}`);
+  check('#1182 ../ escape writes nothing', !fs.existsSync(path.join(base, 'escaped2.md')) && !fs.existsSync(path.join(cwd, 'escaped2.md')));
+
+  o = runIn([]);
+  check('#1182 omit --out still emits to stdout (exit 0)', o.code === 0 && /BUILDER subagent/.test(o.stdout), o.stderr);
+  check('#1182 omit --out writes no file', fs.readdirSync(cwd).length === 0);
+}
+
+// ---------------------------------------------------------------------------
+// #1182 hardening — edge cases flagged correct-but-untested by the phase-02 verifier, plus the
+// end-to-end regression mirroring the original mg-journals symptom.
+// ---------------------------------------------------------------------------
+{
+  const base = fs.mkdtempSync(path.join(SCRATCH, 'out-edge-'));
+  const phase = path.join(base, 'ph');
+  const evil = path.join(base, 'ph-evil'); // sibling whose name PREFIX-matches the phase dir
+  const cwd = path.join(base, 'cwd');
+  fs.mkdirSync(phase); fs.mkdirSync(evil); fs.mkdirSync(cwd);
+  const baseArgs = ['--role', 'builder', '--phase-dir', phase, '--plan', 'plan.md', '--charter', 'charter-builder.md'];
+  const runIn = (extra) => {
+    try {
+      const stdout = execFileSync('node', [COMPOSE, ...baseArgs, ...extra], { encoding: 'utf8', cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+      return { code: 0, stdout, stderr: '' };
+    } catch (e) { return { code: e.status == null ? -1 : e.status, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString() }; }
+  };
+
+  // sibling-prefix dir escape: ".../ph-evil/x.md" string-prefix-matches ".../ph" but is NOT inside it
+  let o = runIn(['--out', '../ph-evil/x.md']);
+  check('#1182 edge: sibling-prefix escape (../ph-evil/x.md) is refused (non-zero)', o.code !== 0, `code=${o.code}`);
+  check('#1182 edge: sibling-prefix escape writes nothing', !fs.existsSync(path.join(evil, 'x.md')));
+  o = runIn(['--out', path.join(evil, 'y.md')]);
+  check('#1182 edge: absolute sibling-prefix path (ph-evil/y.md) is refused', o.code !== 0 && !fs.existsSync(path.join(evil, 'y.md')), `code=${o.code}`);
+
+  // --out . and the phase dir itself
+  o = runIn(['--out', '.']);
+  check('#1182 edge: --out . is refused by the guard (exit 2 + "Refusing --out", not a raw EISDIR crash)', o.code === 2 && /Refusing --out/.test(o.stderr), `code=${o.code}\n${o.stderr}`);
+  o = runIn(['--out', phase]);
+  check('#1182 edge: --out <phase-dir-itself> is refused by the guard (exit 2 + "Refusing --out")', o.code === 2 && /Refusing --out/.test(o.stderr), `code=${o.code}\n${o.stderr}`);
+  check('#1182 edge: refused dir targets leave the phase dir empty', fs.readdirSync(phase).length === 0, fs.readdirSync(phase).join(','));
+
+  // tmp/../../ escape
+  o = runIn(['--out', 'tmp/../../escaped3.md']);
+  check('#1182 edge: tmp/../../ escape is refused (non-zero)', o.code !== 0, `code=${o.code}`);
+  check('#1182 edge: tmp/../../ escape writes nothing', !fs.existsSync(path.join(base, 'escaped3.md')) && !fs.existsSync(path.join(phase, 'escaped3.md')));
+  // a ../ that normalizes back inside is still allowed
+  o = runIn(['--out', 'tmp/../inside.md']);
+  check('#1182 edge: tmp/../inside.md (normalizes inside) is allowed', o.code === 0 && fs.existsSync(path.join(phase, 'inside.md')), o.stderr);
+
+  // empty --out "" falls through to stdout
+  o = runIn(['--out', '']);
+  check('#1182 edge: empty --out "" exits 0 and emits to stdout', o.code === 0 && /BUILDER subagent/.test(o.stdout), o.stderr);
+  check('#1182 edge: empty --out "" writes no new file in phase or cwd', fs.readdirSync(cwd).length === 0 && fs.readdirSync(phase).join(',') === 'inside.md', fs.readdirSync(phase).join(','));
+}
+
+// End-to-end #1182 regression (mg-journals symptom): cwd is the PROJECT ROOT (not the phase dir), the
+// phase dir is nested deep under it, and a bare-basename --out must land in the phase folder with
+// NOTHING new written at the project root / cwd.
+{
+  const root = fs.mkdtempSync(path.join(SCRATCH, 'e2e-root-'));
+  const phase = path.join(root, 'dev', 'epic', '03-build');
+  fs.mkdirSync(phase, { recursive: true });
+  const before = fs.readdirSync(root).sort();
+  const name = 'spawn-prompt-builder-r1.md';
+  let o;
+  try {
+    const stdout = execFileSync('node', [COMPOSE, '--role', 'builder', '--phase-dir', 'dev/epic/03-build', '--plan', 'plan.md',
+      '--charter', 'charter-builder.md', '--project-root', root, '--out', name], { encoding: 'utf8', cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+    o = { code: 0, stdout, stderr: '' };
+  } catch (e) { o = { code: e.status == null ? -1 : e.status, stdout: '', stderr: (e.stderr || '').toString() }; }
+  check('#1182 e2e: relative --phase-dir + bare-basename --out from project-root cwd exits 0', o.code === 0, o.stderr);
+  const landed = path.join(phase, name);
+  check('#1182 e2e: prompt landed in the phase folder', fs.existsSync(landed) && /BUILDER subagent/.test(fs.readFileSync(landed, 'utf8')));
+  check('#1182 e2e: NOTHING new written at cwd/project-root (listing unchanged, no stray file)',
+    JSON.stringify(fs.readdirSync(root).sort()) === JSON.stringify(before) && !fs.existsSync(path.join(root, name)), fs.readdirSync(root).join(','));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

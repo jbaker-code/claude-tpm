@@ -62,7 +62,9 @@
  *   --epic <label>       Optional. Epic/lineage label mentioned in the header.
  *   --project-root <p>   Optional. If given, emits the env-source ritual (step zero)
  *                        with the task folder derived from --phase-dir.
- *   --out <path>         Optional. Write to a file instead of stdout.
+ *   --out <path>         Optional. Write to a file instead of stdout. A relative path is resolved
+ *                        against --phase-dir (a bare name lands in the phase folder); a path that
+ *                        resolves outside the phase dir is refused (exit 2, nothing written).
  *   --session <ref>      Optional. Attribute the prompt to a session (0012b, or 0012 with --track b); default: auto-resolved.
  *   --track <letter>     Optional. Track letter a-z, used with --session.
  *   --help               Print this message.
@@ -311,8 +313,19 @@ function main() {
 
   const text = compose(opts);
   if (opts.out) {
-    fs.writeFileSync(path.resolve(opts.out), text);
-    console.error(`Wrote spawn prompt to ${opts.out}`);
+    // #1182: a RELATIVE --out resolves against the phase dir (not cwd), so a bare basename lands in the
+    // phase folder. An --out that escapes the phase dir is refused (fail loud, nothing written).
+    const phaseAbs = path.resolve(opts.phaseDir);
+    const outAbs = path.resolve(phaseAbs, opts.out);
+    const rel = path.relative(phaseAbs, outAbs);
+    if (rel === '' || rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) {
+      console.error(`Refusing --out: "${opts.out}" resolves to ${outAbs}, which is outside the phase dir ${phaseAbs}. ` +
+        'Pass a path inside the phase folder (e.g. --out spawn-prompt-builder-r1.md or --out tmp/<file>), or omit --out for stdout.');
+      process.exit(2);
+    }
+    fs.mkdirSync(path.dirname(outAbs), { recursive: true });
+    fs.writeFileSync(outAbs, text);
+    console.error(`Wrote spawn prompt to ${outAbs}`);
   } else {
     process.stdout.write(text);
   }
