@@ -123,6 +123,39 @@ function validatePayload(payloadOrRecord, record) {
   }
   assertNonEmpty(meta.tpmVersion, 'meta.tpmVersion');
 
+  // ── meta: ADDITIVE per-track keys (tracks store; NO schemaVersion bump). Each is validated only
+  // when PRESENT (absent is always fine; unknown keys are still accepted and preserved). ──
+  if (meta.track !== undefined && !(typeof meta.track === 'string' && /^[a-z]$/.test(meta.track))) {
+    throw new Error(`validatePayload: meta.track must be one letter a-z, got ${JSON.stringify(meta.track)}`);
+  }
+  if (meta.claudeSessionId !== undefined && meta.claudeSessionId !== null && typeof meta.claudeSessionId !== 'string') {
+    throw new Error('validatePayload: meta.claudeSessionId must be a string or null');
+  }
+  if (meta.claudePid !== undefined && meta.claudePid !== null
+      && !(Number.isSafeInteger(meta.claudePid) && meta.claudePid > 1)) {
+    throw new Error(`validatePayload: meta.claudePid must be an integer > 1 or null, got ${JSON.stringify(meta.claudePid)}`);
+  }
+  if (meta.claudePidStartedAt !== undefined && meta.claudePidStartedAt !== null) {
+    assertIsoTz(meta.claudePidStartedAt, 'meta.claudePidStartedAt');
+  }
+  if (meta.hostname !== undefined && meta.hostname !== null && typeof meta.hostname !== 'string') {
+    throw new Error('validatePayload: meta.hostname must be a string or null');
+  }
+  if (meta.lastWriter !== undefined) {
+    if (!isPlainObject(meta.lastWriter)) throw new Error('validatePayload: meta.lastWriter must be an object { version, at }');
+    assertIsoTz(meta.lastWriter.at, 'meta.lastWriter.at');
+    if (meta.lastWriter.version !== null && typeof meta.lastWriter.version !== 'string') {
+      throw new Error('validatePayload: meta.lastWriter.version must be a string or null');
+    }
+  }
+  if (meta.adoptions !== undefined) {
+    if (!Array.isArray(meta.adoptions)) throw new Error('validatePayload: meta.adoptions must be an array');
+    meta.adoptions.forEach((a, i) => {
+      if (!isPlainObject(a)) throw new Error(`validatePayload: meta.adoptions[${i}] must be an object`);
+      assertIsoTz(a.at, `meta.adoptions[${i}].at`);
+    });
+  }
+
   // ── handoff (nullable until first save; REPLACE-semantics) ──
   const handoff = rec.handoff;
   if (handoff !== null && handoff !== undefined) {

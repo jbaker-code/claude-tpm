@@ -139,6 +139,72 @@ portability rule: each suite carries its own `lib/`, duplication accepted. Do NO
 `#paths`/subpath-imports module. Any paths/root-finding helper a suite needs lives in that suite's `lib/`
 (copied, not shared).
 
+## 7. Shared stores: lock the whole read-modify-write
+
+**Rule.** A tool that READS a shared store, MODIFIES what it read, and WRITES it back (allocate the next
+id, update an index row, rebuild an index from bodies) takes the `tools/lib/lock.js` directory lock for the
+**whole span**, from the first read the write depends on to the last write. Several Claude sessions run the
+same tool against one store at once; without the lock, two of them are handed the same id or one overwrites
+the other's index update, and nothing reports it.
+
+- **Atomic rename is not enough.** Writing to a temp file and renaming over the target (`io.atomicWriteFileSync`)
+  prevents a TORN file; it does not prevent a LOST UPDATE (both writers read the old value, each renames
+  its own result over the other's). Keep atomic writes for the files (readers never see half a file) AND take
+  the lock for the span.
+- **The helper and its API** (the shared base lib, reached through the suite's `lib/base.js` namespace,
+  e.g. `base.lock.withLock`, never copied): `withLock(lockDir, fn, opts?)` acquires, runs `fn(handle)`
+  SYNCHRONOUSLY, and always releases, even if `fn` throws (the original error is rethrown unchanged).
+  `lockDir` is the final lock path, conventionally `<store>/.lock`. Also `acquire`, `tryAcquire`,
+  `inspect` / `readOwner` / `isStale` (read-only, for a doctor), `breakLock`, `LockError` with `err.code`
+  (`ELOCK_TIMEOUT`, `ELOCK_LOST`, ...; branch on the code, never the message). Options include `verb`,
+  `version`, `label` (stderr prefix), `waitMs` (default 45000) and `staleMs` (default 30000); env
+  `TPM_LOCK_WAIT_MS` / `TPM_LOCK_STALE_MS` override when the option is absent. Full contract: the header
+  of `tools/lib/lock.js`.
+- **Shape it must have.** Take the lock INSIDE each mutating operation (so direct `require()`-ers are covered
+  too), after any cheap refusal check, and read stdin / `--file` inputs BEFORE taking it. The lock is not
+  re-entrant: a locking operation must not call another locking operation. Read-only verbs take no lock
+  (they rely on atomic writes and may retry a transient `ENOENT`). The lock directory ignores itself
+  (`.gitignore` of `*`), so it is never committed.
+- **Test it by forcing the interleaving, not by racing real processes.** A race test that merely launches
+  N processes passes by luck. Park one process inside its critical section with the test-only seam
+  `tools/tests/lib/fs-barrier.js` (a `node -r` preload armed by `BARRIER_FN` + `BARRIER_PATTERN`, with
+  `BARRIER_READY` / `BARRIER_WAIT` files), run the competitor, assert it is still waiting and has written
+  nothing, release, and assert both effects landed. Then MUTATION-CHECK the test: disable the protection in
+  a scratch COPY of the tool and see the test go red. Run such files one at a time; keep at most 2-3 child
+  processes alive. Worked examples: `tools/task/tests/task-lock-forced.test.js`,
+  `task-lock-interleave.test.js`, `tools/session/tests/lock-interleave.test.js`.
+- **What the lock does not cover.** Tools that write a user-chosen output path, or a staging directory, are
+  last-writer-wins unless they take the lock themselves (`tpm task migrate --out-dir <live store> --force`
+  bypasses it and is unsupported).
+
+## 8. Session attribution: use the shared resolver
+
+**Rule.** A tool that wants to know, or record, which tpm session it is running in (to stamp a history event, a ledger row,
+a token, a generated file) calls the shared resolver, `tools/lib/attribution.js`. It does NOT read `TPM_SESSION_ID`,
+`CLAUDE_CODE_SESSION_ID` or `CLAUDE_PID` itself, and it does NOT read the sessions directory or open a track file itself.
+Two copies of the rule drift, and a tool that guesses differently stamps a different session than its neighbours.
+
+- **The call.** `resolveAttribution({ explicit })` returns `{ session, sessionVia }`, where `session` is the stored form
+  (`session-0012b`; track a is `session-0012`) and `sessionVia` is `'flag' | 'env' | 'lookup'`; blank is
+  `{ session: null, sessionVia: null }`. Order: explicit flag, then `TPM_SESSION_ID`, then a lookup of the Claude session id
+  against the session tracks, then blank. Wrap the result in `toEventFields(...)` to get `{}` when blank or
+  `{ session, sessionVia }` to spread into a record, so the two keys are written together or not at all. It never throws and
+  never prints.
+- **Flags.** Offer `--session <ref> [--track <letter>]` and validate them with `parseExplicit({ session, track })` BEFORE any
+  write: a malformed or disagreeing flag is a usage error (exit 2, nothing written). Only the explicit flag may fail the
+  command; everything the resolver finds by itself must fall through to blank, because attribution is informational and
+  never blocks a write.
+- **Comparing.** Normalise both sides with `normalizeStored` / `sessionMatches`; never compare raw strings or slice a prefix.
+  The stored form (`session-0012b`) deliberately differs from the session suite's bare `fromSession` label (`0012b`).
+- **The sessions directory.** If you need it, use `tools/lib/sessions-dir.js` (`resolveSessionsDirQuiet`), the quiet twin of the
+  session suite's loud resolver. Do not import from `tools/session/` to find a session from the task or workflow suites.
+- **Reach it** through the suite's `lib/base.js` namespace where one exists (`base.attribution` in the task suite), else
+  `require('../lib/attribution')`; do not copy it.
+- **Tests.** Give a test child an EXPLICIT environment (PATH, a scratch `HOME`, fake `CLAUDE_CODE_SESSION_ID` / `CLAUDE_PID`,
+  a scratch `TPM_SESSIONS_DIR`) so the invoking session never leaks in. Reference: `tools/tests/tpm-attribution-lockin.test.js`.
+
+Reference for users of the data: `tools/task/tpm-task.md` ("Session attribution").
+
 ---
 
 # Part II — Using & building tools inside a task (worker/verifier-facing)

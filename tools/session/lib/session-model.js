@@ -24,6 +24,7 @@
  */
 const fs = require('fs');
 
+const { atomicWriteFileSync } = require('../../lib/io');
 const { readEnvelope, writeEnvelope, KNOWN_KINDS } = require('../../lib/envelope');
 const { migrate, CURRENT } = require('../../lib/version');
 const { validateEnvelope } = require('../../lib/validate');
@@ -31,6 +32,7 @@ const { applyUpdate } = require('../../lib/update');
 const { normalizeArray } = require('../../lib/normalize');
 const { nowIsoTz } = require('../../lib/timestamp');
 const { SESSION_KIND, EDITABLE_TABLE, validatePayload } = require('./session-schema');
+const ids = require('./session-ids');
 
 // Local deep clone (JSON-serialisable records only — matches the canonical store). Kept
 // suite-local rather than reaching into the base `_util` (suite-internal, not public API).
@@ -82,13 +84,22 @@ function saveSession(record, opts) {
   if (!jsonPath) throw new Error('saveSession: opts.jsonPath is required');
 
   const out = deepClone(record);
+  // OPT-IN B2 stamp (tracks store): only when the caller passes `lastWriter: { version }` do we set
+  // meta.lastWriter = { version, at }. Without the option the function is byte-stable (unconditional
+  // stamping broke the round-trip-identity test). ops.persist passes it; the model never does by itself.
+  if (options.lastWriter && out && out.meta && typeof out.meta === 'object') {
+    out.meta.lastWriter = {
+      version: options.lastWriter.version === undefined ? null : options.lastWriter.version,
+      at: nowIsoTz(),
+    };
+  }
   if (out && out.handoff !== null && out.handoff !== undefined) {
     out.handoff.updatedAt = nowIsoTz();
   }
   validateEnvelope(out, { payloadValidator: validatePayload, knownKinds: KNOWN_KINDS });
   writeEnvelope(jsonPath, out);                 // atomic canonical write FIRST
   if (mdPath && typeof render === 'function') {
-    fs.writeFileSync(mdPath, render(out));      // derived file — regenerated only AFTER JSON ok
+    atomicWriteFileSync(mdPath, render(out));   // derived file — regenerated only AFTER JSON ok (atomic: readers never see a torn .md)
   }
   return out;
 }
@@ -212,12 +223,65 @@ function openSession(spec) {
   let prior = s.priorSession;
   if (!prior && s.priorSessionPath) prior = loadSession(s.priorSessionPath);
   if (prior && Array.isArray(prior.punchlist)) {
-    const fromSession = prior.meta && prior.meta.number;   // source session number (P06 fromSession)
+    const fromSession = ids.fromSessionLabel(prior.meta);   // source session (+ track letter for b..z) (P06 fromSession)
     for (const item of prior.punchlist) {
       if (item && item.state === 'open') record = carryInPunchlist(record, item, fromSession);
     }
   }
   return record;
+}
+
+/**
+ * openTrack({ number, track = 'a', identity, tpmVersion, lastWriterVersion, now?, priorSession?, priorSessionPath? }) -> record
+ *
+ * The record factory of the tracks store: the same envelope as openSession plus the ADDITIVE per-track
+ * `meta` keys (track, claudeSessionId, claudePid, claudePidStartedAt, hostname, lastWriter). Every identity
+ * field may be null — a null never blocks. A claimed/parallel track carries NO items (Q6) — a prior
+ * session is consulted only when explicitly passed (the legacy manual `open --prior-session-path`).
+ * `meta.tpmVersion` keeps today's meaning ("0.0.0" when not given); the B2 stamp is `meta.lastWriter`.
+ */
+function openTrack(spec) {
+  const s = spec || {};
+  if (!s.number) throw new Error('openTrack: `number` is required');
+  const track = s.track === undefined || s.track === null ? 'a' : s.track;
+  if (!/^[a-z]$/.test(String(track))) throw new Error(`openTrack: track must be one letter a-z, got ${JSON.stringify(s.track)}`);
+  const id = s.identity && typeof s.identity === 'object' ? s.identity : {};
+  const claudeSessionId = typeof id.claudeSessionId === 'string' && id.claudeSessionId ? id.claudeSessionId : null;
+  const at = s.now || nowIsoTz();
+  let record = {
+    schemaVersion: CURRENT,
+    kind: SESSION_KIND,
+    meta: {
+      number: canonicalNumber(s.number),
+      track,
+      sessionIds: claudeSessionId ? [claudeSessionId] : [],
+      claudeSessionId,
+      claudePid: id.claudePid === undefined ? null : id.claudePid,
+      claudePidStartedAt: id.claudePidStartedAt === undefined ? null : id.claudePidStartedAt,
+      hostname: id.hostname === undefined ? null : id.hostname,
+      openedAt: at,
+      closedAt: null,
+      tpmVersion: s.tpmVersion || '0.0.0',
+      lastWriter: { version: s.lastWriterVersion === undefined ? null : s.lastWriterVersion, at },
+    },
+    handoff: null,
+    log: [],
+    punchlist: [],
+  };
+  let prior = s.priorSession;
+  if (!prior && s.priorSessionPath) prior = loadSession(s.priorSessionPath);
+  if (prior && Array.isArray(prior.punchlist)) {
+    const fromSession = ids.fromSessionLabel(prior.meta);   // '0001' for track a / legacy, '0001b' for b..z: the track of origin survives
+    for (const item of prior.punchlist) {
+      if (item && item.state === 'open') record = carryInPunchlist(record, item, fromSession);
+    }
+  }
+  return record;
+}
+
+/** validateRecord(record) -> void   the same envelope+payload validation saveSession runs (throws loud). */
+function validateRecord(record) {
+  validateEnvelope(record, { payloadValidator: validatePayload, knownKinds: KNOWN_KINDS });
 }
 
 /**
@@ -369,11 +433,13 @@ function canonicalNumber(n) {
 
 // Friendly session-prefixed id "<number>.<n>": number stripped of zero-padding, n monotonic
 // within the session (max existing suffix + 1). Reuse-after-drop is a later refinement.
+// Track-aware (stored form): track a / legacy -> "123.4" (unchanged); track b..z -> "123b.4", so two
+// tracks of one session never mint the same id. The shape is defined once, in session-ids.js.
 function nextItemId(record) {
-  const prefix = String(Number(record.meta.number));
+  const prefix = ids.storedPrefix(record.meta.number, record.meta && record.meta.track);
   let maxN = 0;
   for (const it of record.punchlist || []) {
-    const m = /^(\d+)\.(\d+)$/.exec(String(it.id));
+    const m = /^(\d+[a-z]?)\.(\d+)$/.exec(String(it.id));
     if (m && m[1] === prefix) maxN = Math.max(maxN, Number(m[2]));
   }
   return `${prefix}.${maxN + 1}`;
@@ -389,8 +455,15 @@ function mintSlug(record) {
   throw new Error('mintSlug: could not mint a unique slug');
 }
 
+// findItem: (1) an exact id or slug match first (a legacy id or a slug that merely looks like an id keeps working);
+// (2) else, when the input is id-shaped, the canonical form: `123a.4`, `#123.4` and `0123.4` all find stored `123.4`.
 function findItem(record, idOrSlug) {
-  return (record.punchlist || []).find((it) => it.id === idOrSlug || it.slug === idOrSlug);
+  const list = record.punchlist || [];
+  const exact = list.find((it) => it.id === idOrSlug || it.slug === idOrSlug);
+  if (exact) return exact;
+  const parsed = ids.parseItemId(idOrSlug);
+  if (!parsed) return undefined;
+  return list.find((it) => it.id === parsed.stored);
 }
 
 module.exports = {
@@ -405,6 +478,8 @@ module.exports = {
   importPunchlist,
   // mechanical ops
   openSession,
+  openTrack,
+  validateRecord,
   canonicalNumber,
   resumeSession,
   appendLog,
@@ -414,4 +489,5 @@ module.exports = {
   reopenPunchlistItem,
   dropPunchlistItem,
   closeSession,
+  findItem,
 };

@@ -58,9 +58,9 @@ function render(record, opts) {
   }
   const options = opts || {};
   const sections = [
-    renderHeader(record),
+    renderHeader(record, options),
     renderHandoff(record),
-    renderPunchlist(record, options.now),
+    renderPunchlist(record, options.now, options.displayId),
     renderLog(record),
   ];
   return sections.join('\n\n') + '\n';
@@ -68,11 +68,19 @@ function render(record, opts) {
 
 // ── header ─────────────────────────────────────────────────────────────────
 
-function renderHeader(record) {
+function renderHeader(record, options) {
+  const opt = options || {};
   const meta = isPlainObject(record.meta) ? record.meta : {};
   const num = padNumber(meta.number);
+  // Track b..z: the file is session-NNNN-<x>.json and the title names the track. Track a / absent is
+  // byte-identical to the pre-tracks output (goldens unchanged).
+  const letter = typeof meta.track === 'string' && /^[b-z]$/.test(meta.track) ? meta.track : '';
+  const fileStem = 'session-' + num + (letter ? '-' + letter : '');
   const date = shortDate(meta.openedAt);
-  const state = meta.closedAt ? 'closed' : 'open';
+  // Additive render options (phase 12; every default leaves today's bytes unchanged): `stateWord` replaces the
+  // closed/open banner word (the merged read overlays a marker seal, which the record itself cannot carry);
+  // `trackLabel` names track a in the title (b..z already carry it).
+  const state = typeof opt.stateWord === 'string' && opt.stateWord ? opt.stateWord : (meta.closedAt ? 'closed' : 'open');
   const schema = record.schemaVersion != null ? String(record.schemaVersion) : '?';
   const id = abbrevId(firstSessionId(meta.sessionIds));
   // (generated from: <12hex>): the content hash of the WHOLE canonical record (Q-D; wording per
@@ -81,9 +89,9 @@ function renderHeader(record) {
   // never sees this banner, so there is no self-reference.
   const gen = hashRecord(record);
   return [
-    `# Session ${num} · ${date}`,
+    `# Session ${num} · ${date}` + (letter ? ` · track ${letter}` : (opt.trackLabel === true ? ' · track a' : '')),
     '',
-    '> _Generated from `session-' + num + '.json` — do not hand-edit; regenerated and overwritten on every save._',
+    '> _Generated from `' + fileStem + '.json` — do not hand-edit; regenerated and overwritten on every save._',
     '> _Change it via `tpm session` ops or import (`#1115`). · session ' + num +
       ' · **' + state + '** · schema ' + schema + ' · id ' + id + ' (generated from: ' + gen + ')_',
   ].join('\n');
@@ -139,7 +147,8 @@ function bulleted(items) {
 
 // ── punchlist ────────────────────────────────────────────────────────────────
 
-function renderPunchlist(record, now) {
+function renderPunchlist(record, now, displayId) {
+  const shown = typeof displayId === 'function' ? displayId : (id) => id;
   const items = Array.isArray(record.punchlist) ? record.punchlist : [];
   const open = items.filter((it) => it && it.state === 'open');
   const done = items.filter((it) => it && it.state === 'done');
@@ -151,7 +160,7 @@ function renderPunchlist(record, now) {
   open.forEach((it, idx) => {
     const marker = carriedMarker(it);
     openLines.push(
-      (idx + 1) + '. `#' + it.id + '`' + marker + ' ' + it.text + ' _(' + ageOf(it.createdAt, now) + ')_',
+      (idx + 1) + '. `#' + shown(it.id) + '`' + marker + ' ' + it.text + ' _(' + ageOf(it.createdAt, now) + ')_',
     );
   });
   sections.push(openLines.join('\n'));
@@ -161,7 +170,7 @@ function renderPunchlist(record, now) {
     done.forEach((it) => {
       const closedTs = lastEventTs(it, 'close');
       const suffix = closedTs ? ' _(closed ' + shortDateTime(closedTs).slice(11) + ')_' : '';
-      doneLines.push('- ~~`#' + it.id + '` ' + it.text + '~~' + suffix);
+      doneLines.push('- ~~`#' + shown(it.id) + '` ' + it.text + '~~' + suffix);
     });
     sections.push(doneLines.join('\n'));
   }

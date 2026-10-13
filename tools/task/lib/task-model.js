@@ -93,8 +93,70 @@ function _pushHistory(out, event) {
   if (!Array.isArray(out.history)) out.history = [];
   const ev = { at: (event && event.at) || nowIsoTz() };
   for (const k of Object.keys(event || {})) if (k !== 'at') ev[k] = event[k];
+  // Session attribution (multi-session): stamped only when a store verb set one AND the caller did not supply its own.
+  if (ATTRIBUTION && !('session' in ev)) { ev.session = ATTRIBUTION.session; ev.sessionVia = ATTRIBUTION.sessionVia; }
   out.history.push(ev);
   return out;
+}
+
+// ── reader ENOENT-retry (lock-free readers vs. a rename-over writer) ──────────
+// `rename`-over is content-atomic (0 torn reads) but NOT availability-gap-free on a shared mount: a reader
+// can see a transient ENOENT (`open` fails although `stat` succeeds) for a few ms while a writer swaps the
+// file. Read verbs take no lock, so the task read path retries a small bounded number of times, ONLY when
+// the file demonstrably exists (existsSync true) — a genuinely missing file still fails at once, loudly.
+// A name that stays unopenable (a "stranded" name) exhausts the retries and throws the same loud error;
+// recovery is to move it aside (`mv tasks-index.json tasks-index.json.aside`, never delete-then-add) and
+// run `tpm task reindex`.
+const READ_RETRIES = 3;          // extra attempts after the first
+const READ_RETRY_MS = 15;        // 10-20 ms apart
+function _nap(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+function readCanonicalRetry(filePath) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return readCanonicalSync(filePath);
+    } catch (e) {
+      const transient = attempt < READ_RETRIES && /ENOENT/.test(String(e && e.message)) && fs.existsSync(filePath);
+      if (!transient) throw e;
+      _nap(READ_RETRY_MS);
+    }
+  }
+}
+/** readTextRetry(filePath) -> string — the same bounded retry for a derived (non-JSON) file. */
+function readTextRetry(filePath) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fs.readFileSync(filePath, 'utf8');
+    } catch (e) {
+      const transient = attempt < READ_RETRIES && e && e.code === 'ENOENT' && fs.existsSync(filePath);
+      if (!transient) throw e;
+      _nap(READ_RETRY_MS);
+    }
+  }
+}
+
+// ── lastWriter stamp (B2 / #1174) ─────────────────────────────────────────────
+// While a store verb holds the lock, tpm-task.js sets the running tpm version here; writeIndex then stamps
+// `lastWriter: {version, at}` as a TOP-LEVEL key of tasks-index.json (old tools preserve unknown top-level
+// keys; the index is NOT reshaped). Unset (null) -> no stamp is added (and an existing one is left as is).
+let LAST_WRITER = null;
+/** tpmVersion() -> string | null — the running tpm package version (bundle package.json), null when unreadable. */
+function tpmVersion() {
+  try { return require('../../../package.json').version || null; } catch (_) { return null; }
+}
+// ── session attribution (multi-session support) ───────────────────────────────
+// While a store verb holds the lock, tpm-task.js sets the resolved { session, sessionVia } here and _pushHistory
+// stamps both keys on every history event written (never one without the other). Unset (null) -> events are
+// byte-identical to before. The via list is a literal here (the model stays zero-coupling to tools/lib/attribution).
+let ATTRIBUTION = null;
+function setAttribution(info) {
+  const ok = info && typeof info === 'object' && typeof info.session === 'string' && info.session !== ''
+    && ['flag', 'env', 'lookup'].includes(info.sessionVia);
+  ATTRIBUTION = ok ? { session: info.session, sessionVia: info.sessionVia } : null;
+  return ATTRIBUTION;
+}
+function setLastWriter(info) {
+  LAST_WRITER = info && typeof info === 'object' ? { version: info.version == null ? null : String(info.version) } : null;
+  return LAST_WRITER;
 }
 
 // ── IO surface ───────────────────────────────────────────────────────────────
@@ -106,7 +168,7 @@ function _pushHistory(out, event) {
  * validator + the known-kind gate. Returns the migrated + validated full record.
  */
 function loadTask(jsonPath) {
-  const raw = readCanonicalSync(jsonPath);              // read (fail-loud)
+  const raw = readCanonicalRetry(jsonPath);             // read (fail-loud; bounded ENOENT-retry for lock-free readers)
   const migrated = migrate(raw);                         // migrate  ← refuse-unknown-newer fires HERE
   validateEnvelope(migrated, {                           // validate
     payloadValidator: validatePayload,
@@ -150,7 +212,7 @@ function saveTask(record, opts) {
   if (typeof render === 'function') {
     const md = mdPath || jsonPath.replace(/\.json$/, '.md');
     fs.mkdirSync(path.dirname(md), { recursive: true });
-    fs.writeFileSync(md, render(out));                   // derived body — only AFTER JSON ok
+    atomicWriteFileSync(md, render(out));                // derived body — only AFTER JSON ok (atomic: lock-free readers never see a torn .md)
   }
 
   if (tasksDir) {
@@ -649,7 +711,7 @@ function deriveRow(record) {
 function readIndex(tasksDir) {
   const p = indexPathFor(tasksDir);
   if (!fs.existsSync(p)) return _freshIndex();
-  const obj = readCanonicalSync(p);        // fail-loud on corrupt JSON (never silently empty)
+  const obj = readCanonicalRetry(p);       // fail-loud on corrupt JSON (never silently empty); bounded ENOENT-retry
   if (!obj || typeof obj !== 'object' || !Array.isArray(obj.tasks)) return _freshIndex();
   return obj;
 }
@@ -693,10 +755,12 @@ function deriveLabelIndex(rows) {
   return out;
 }
 
-/** writeIndex(tasksDir, indexObj) -> void — atomic write of tasks-index.json (temp→fsync→rename). */
+/** writeIndex(tasksDir, indexObj) -> void — atomic write of tasks-index.json (temp→fsync→rename); stamps `lastWriter` when a store verb set one (setLastWriter). */
 function writeIndex(tasksDir, indexObj) {
   fs.mkdirSync(tasksDir, { recursive: true });
-  atomicWriteFileSync(indexPathFor(tasksDir), JSON.stringify(indexObj, null, 2) + '\n', { encoding: 'utf8' });
+  let out = indexObj;
+  if (LAST_WRITER) out = Object.assign({}, indexObj, { lastWriter: { version: LAST_WRITER.version, at: nowIsoTz() } });  // B2 stamp (under the lock)
+  atomicWriteFileSync(indexPathFor(tasksDir), JSON.stringify(out, null, 2) + '\n', { encoding: 'utf8' });
 }
 
 /**
@@ -733,22 +797,63 @@ function _recount(idx) {
 }
 
 /**
- * reindex(tasksDir, { startId? }) -> indexObj
+ * reindex(tasksDir, { startId?, onUnreadable? }) -> indexObj
  * Full rebuild from the *.json bodies (bodies are truth for row content): scan every
  * bodies/<bucket>/task-*.json, load+derive a row, recompute counts. nextId high-water =
  * max(prior index.nextId, max(bodyId)+1, startId) — NEVER regresses (a hard-deleted top task
  * cannot let an id be reused). Writes tasks-index.json and returns it.
+ *
+ * ── FAILS LOUD on an unreadable body (B1(b) / #1172) ── a body that will not load (unknown-NEWER
+ * schemaVersion, corrupt, invalid) is NEVER silently dropped from the index. `opts.onUnreadable`:
+ *   'refuse' (default) — throw ReindexError listing every skipped body (count + id + file + reason);
+ *                        NOTHING is written, so the existing index (and its old rows) is kept as is.
+ *   'drop'             — the explicit `--drop-unreadable` opt-in: omit those rows, write the index, and
+ *                        report them on the returned index's non-enumerable `skipped` array.
+ *   'keep'             — keep the PRIOR index row for an unreadable body (when the old index has one) and
+ *                        report it on `skipped`; used by `remove --hard`, which must not fail half-done.
+ * The returned index always carries a non-enumerable `skipped: [{id, file, reason}]` (empty when none).
  */
+class ReindexError extends Error {
+  constructor(message, skipped) {
+    super(message);
+    this.name = 'ReindexError';
+    this.code = 'EREINDEX_UNREADABLE';
+    this.skipped = skipped;
+  }
+}
+
 function reindex(tasksDir, opts) {
   const options = opts || {};
+  const mode = options.onUnreadable || 'refuse';
   const prior = readIndex(tasksDir);
   const startId = options.startId != null ? String(options.startId) : (prior.startId || DEFAULT_START_ID);
 
   const rows = [];
+  const skipped = [];
   for (const p of listBodyPaths(tasksDir)) {
     let rec;
-    try { rec = loadTask(p); } catch (_) { continue; }   // skip an unreadable/invalid body
+    try {
+      rec = loadTask(p);
+    } catch (e) {
+      const m = /task-(\d+)\.json$/.exec(p);
+      const id = m ? m[1] : null;
+      skipped.push({ id, file: path.relative(tasksDir, p).split(path.sep).join('/'), reason: String(e && e.message ? e.message : e) });
+      if (mode === 'keep' && id != null) {
+        const old = (Array.isArray(prior.tasks) ? prior.tasks : []).find((r) => String(r.id) === id);
+        if (old) rows.push(old);
+      }
+      continue;
+    }
     rows.push(deriveRow(rec));
+  }
+  if (skipped.length && mode === 'refuse') {
+    const list = skipped.map((s) => `  - #${s.id} (${s.file}): ${s.reason}`).join('\n');
+    throw new ReindexError(
+      `reindex REFUSED: ${skipped.length} task body(ies) could not be read, and an index rebuilt now would silently drop them:\n${list}\n` +
+      'Nothing was written; the existing index is unchanged. Upgrade tpm if a body is from a newer version, fix the body, ' +
+      'or re-run with --drop-unreadable to discard these rows from the index (their body files stay on disk).',
+      skipped,
+    );
   }
   const idx = {
     schemaVersion: CURRENT,
@@ -761,6 +866,7 @@ function reindex(tasksDir, opts) {
   };
   const rebuilt = _recount(idx);
   writeIndex(tasksDir, rebuilt);
+  Object.defineProperty(rebuilt, 'skipped', { value: skipped, enumerable: false });
   return rebuilt;
 }
 
@@ -816,7 +922,7 @@ function writeIndexViews(tasksDir, indexObj, indexRender, opts) {
   ];
   fs.mkdirSync(tasksDir, { recursive: true });
   for (const v of views) {
-    fs.writeFileSync(path.join(tasksDir, v.file), indexRender(indexObj, { states: v.states, now }));
+    atomicWriteFileSync(path.join(tasksDir, v.file), indexRender(indexObj, { states: v.states, now }), { encoding: 'utf8' });
   }
 }
 
@@ -911,6 +1017,12 @@ module.exports = {
   readIndex,
   writeIndex,
   reindex,
+  ReindexError,
+  readCanonicalRetry,
+  readTextRetry,
+  setLastWriter,
+  setAttribution,
+  tpmVersion,
   allocateNextId,
   bodyPathFor,
   indexPathFor,

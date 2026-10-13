@@ -1,0 +1,201 @@
+$ boot-read [one sealed session, other instance]
+exit 0
+--- stdout
+== PRIOR SESSION 0001 · <SD>/session-0001/ ==
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0001
+
+**Next:**
+next 0001
+
+**In flight:**
+- half-done thing
+
+**Must not redo:**
+- do not rm
+--- OPEN PUNCHLIST (2) ---
+#1.1 · fix flaky retry test  [s0001i1]
+#1.2 · port the exporter  [s0001i2]
+for full detail: read <SD>/session-0001/session-0001.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0001 --style human
+--- stderr
+
+
+$ boot-read [one sealed session, no identity]
+exit 0
+--- stdout
+== PRIOR SESSION 0001 · <SD>/session-0001/ ==
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0001
+
+**Next:**
+next 0001
+
+**In flight:**
+- half-done thing
+
+**Must not redo:**
+- do not rm
+--- OPEN PUNCHLIST (2) ---
+#1.1 · fix flaky retry test  [s0001i1]
+#1.2 · port the exporter  [s0001i2]
+for full detail: read <SD>/session-0001/session-0001.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0001 --style human
+--- stderr
+
+
+$ review [one sealed session]
+exit 0
+--- stdout
+# Session 0001 · 2026-10-05
+
+> _Generated from `session-0001.json` — do not hand-edit; regenerated and overwritten on every save._
+> _Change it via `tpm session` ops or import (`#1115`). · session 0001 · **closed** · schema 1.0.0 · id aaaaaaaa…aaaa (generated from: f54e35650b06)_
+
+## Handoff
+
+**Where we are:**
+where 0001
+
+**Next:**
+next 0001
+
+**In flight:**
+- half-done thing
+
+**Must not redo:**
+- do not rm
+
+## Punchlist
+
+**Open (2)**
+1. `#1.1` fix flaky retry test _(2d ago)_
+2. `#1.2` port the exporter _(2d ago)_
+
+## Log
+_Newest first._
+
+_No log entries yet._
+--- stderr
+
+
+$ boot-read [chain, caller owns 0004]
+exit 0
+--- stdout
+== PRIOR SESSION 0003 · <SD>/session-0003/ ==
+files: <SD>/session-0003/session-0003.json · <SD>/session-0003/session-0003.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0003
+
+**Next:**
+next 0003
+--- OPEN PUNCHLIST (1) ---
+#3.1 · newest open item  [s0003i1]
+for full detail: read <SD>/session-0003/session-0003.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0003 --style human
+--- stderr
+
+
+$ boot-read [chain, a stranger asks]
+exit 0
+--- stdout
+== PRIOR SESSION 0004 · <SD>/session-0004/ ==
+files: <SD>/session-0004/session-0004.json · <SD>/session-0004/session-0004.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0004
+
+**Next:**
+next 0004
+--- OPEN PUNCHLIST (0) ---
+(no open punchlist items)
+--- stderr
+
+
+$ boot-read [legacy left-open under a later session]
+exit 0
+--- stdout
+== PRIOR SESSION 0002 · <SD>/session-0002/ ==
+files: <SD>/session-0002/session-0002.json · <SD>/session-0002/session-0002.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0002
+
+**Next:**
+next 0002
+--- OPEN PUNCHLIST (1) ---
+#2.1 · two  [s0002i1]
+for full detail: read <SD>/session-0002/session-0002.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0002 --style human
+--- stderr
+
+
+$ boot-read [no-handoff prior under an invalid newer record]
+exit 0
+--- stdout
+note: 1 newer record(s) were skipped (unreadable): 0002 (invalid)
+== PRIOR SESSION 0001 · <SD>/session-0001/ ==
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+(no handoff recorded yet — the prior session opened but never saved a handoff.)
+--- OPEN PUNCHLIST (0) ---
+(no open punchlist items)
+--- stderr
+
+
+$ boot-read [corrupt newer above valid]
+exit 0
+--- stdout
+note: 1 newer record(s) were skipped (unreadable): 0009 (corrupt)
+== PRIOR SESSION 0001 · <SD>/session-0001/ ==
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0001
+
+**Next:**
+next 0001
+--- OPEN PUNCHLIST (1) ---
+#1.1 · one  [s0001i1]
+for full detail: read <SD>/session-0001/session-0001.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0001 --style human
+--- stderr
+
+
+$ boot-read [only a corrupt record]
+exit 0
+--- stdout
+boot-read: no prior session found under <SD> — but 1 record(s) could not be read and were skipped: 0005 (corrupt). This is NOT necessarily the first session.
+--- stderr
+
+
+$ boot-read [empty store]
+exit 0
+--- stdout
+boot-read: no prior session found under <SD> — this looks like the first session. Nothing to pick up.
+--- stderr
+
+
+$ boot-read [only a hollow folder]
+exit 0
+--- stdout
+boot-read: no prior session found under <SD> — 1 session folder(s) held no readable record. This is NOT necessarily the first session.
+--- stderr
+
+
+$ boot-read [stray session-notes.md beside a record]
+exit 0
+--- stdout
+== PRIOR SESSION 0001 · <SD>/session-0001/ ==
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md   (canonical JSON + derived .md; the log reads newest-first)
+--- HANDOFF (read fully) ---
+**Where we are:**
+where 0001
+
+**Next:**
+next 0001
+--- OPEN PUNCHLIST (1) ---
+#1.1 · one  [s0001i1]
+for full detail: read <SD>/session-0001/session-0001.md (## Punchlist / ## Log), or run: tpm session export --sessions-dir <SD> --session 0001 --style human
+--- stderr
+

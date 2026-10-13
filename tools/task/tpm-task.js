@@ -46,12 +46,52 @@
  * the `op*` functions. Zero third-party deps; Node built-ins only.
  */
 const fs = require('fs');
+const path = require('path');
 
 const model = require('./lib/task-model');
 const converter = require('./lib/task-converter');
-const { nowIsoTz } = require('./lib/base').timestamp;
+const base = require('./lib/base');
+const { nowIsoTz } = base.timestamp;
+const attribution = base.attribution;
 const config = require('./tpm-task-config');
 const schema = require('./lib/task-schema');
+const { detectStore } = require('./tpm-task-migrate'); // #1114.B rollout guard: refuse verbs on an un-migrated 0.1.0 store
+
+// ── the store lock (multi-session support) ─────────────────────────────────────
+//
+// Every MUTATING op holds the store's directory lock (`<tasksDir>/.lock`, tools/lib/lock.js) for its WHOLE
+// read-modify-write: from the first read the write depends on (id allocation, the body load, the index)
+// to the last write (the three index views). That is what stops two Claude instances being handed the same
+// id or losing each other's index update. The lock is taken INSIDE each `op*` (not in main/dispatch) so
+// direct require()-ers of the ops are protected too. Read verbs (list/show/labels/history/export/doctor)
+// NEVER take it. Ordering rules: (1) main() runs assertNotOldFormatStore BEFORE the op, so no `.lock` appears
+// inside an un-migrated 0.1.0 store; (2) every stdin / --file / --body-txt-file input is read BEFORE the lock
+// is taken (never block on input while holding it). The lock is NOT re-entrant: an op must never call
+// another locking op (opHardRemove calls model.reindex directly, not opReindex).
+// `lock` is reached through the namespace (`base.lock.withLock`) so fault injection and test seams see it.
+
+/** The running tpm version (the lock-owner `version` and the `lastWriter` stamp); null when unreadable. */
+const TPM_VERSION = model.tpmVersion();
+const LOCK_HINT = 'run `tpm task doctor`; if it reports drift, `tpm task reindex`';
+
+/** The lock directory of a store. */
+function lockDirFor(tasksDir) { return path.join(tasksDir, '.lock'); }
+
+/**
+ * withStoreLock(tasksDir, verb, fn, { create }) -> fn()'s value
+ * Run `fn` holding the store lock; stamp `lastWriter` (B2) for every index write inside it. With no
+ * tasksDir, or (unless `create`) a store dir that does not exist yet, runs `fn` unlocked so it fails with its
+ * own normal error and a typo'd --tasks-dir never creates a stray directory (only add/reindex create stores).
+ */
+function withStoreLock(tasksDir, verb, fn, o) {
+  if (!tasksDir) return fn();
+  if (!(o && o.create) && !fs.existsSync(tasksDir)) return fn();
+  return base.lock.withLock(lockDirFor(tasksDir), () => {
+    model.setLastWriter({ version: TPM_VERSION });
+    model.setAttribution(o && o.attribution || null);   // resolved BEFORE the lock (dispatch); data on the event
+    try { return fn(); } finally { model.setLastWriter(null); model.setAttribution(null); }
+  }, { verb, version: TPM_VERSION, label: 'tpm-task', lostHint: LOCK_HINT });
+}
 
 // ── shared save path ───────────────────────────────────────────────────────────
 
@@ -102,19 +142,22 @@ function collectLabels(args) {
  */
 function opAdd(opts) {
   const o = opts || {};
-  let record = model.openTask({
-    id: o.id,
-    headline: o.headline,
-    labels: o.labels,
-    summary: o.summary,
-    context: o.context,
-    tasksDir: o.tasksDir,      // allocate id from the high-water when no id given
-  });
-  if (o.bodyTxtFile) {
-    const field = o.field || 'summary';
-    record = model.importBodyText(record, { field, text: readFileText(o.bodyTxtFile) });
-  }
-  return persist(record, o);
+  const input = preReadFile(o.bodyTxtFile);            // user input is read BEFORE the lock is taken
+  return withStoreLock(o.tasksDir, 'add', () => {
+    let record = model.openTask({
+      id: o.id,
+      headline: o.headline,
+      labels: o.labels,
+      summary: o.summary,
+      context: o.context,
+      tasksDir: o.tasksDir,      // allocate id from the high-water when no id given (inside the lock)
+    });
+    if (o.bodyTxtFile) {
+      const field = o.field || 'summary';
+      record = model.importBodyText(record, { field, text: input() });
+    }
+    return persist(record, o);
+  }, { create: true, attribution: o.attribution });
 }
 
 /**
@@ -125,18 +168,21 @@ function opAdd(opts) {
  */
 function opEdit(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.tasksDir, o.id);
-  const patch = {};
-  if (o.headline !== undefined) patch.headline = o.headline;
-  if (o.labels !== undefined) patch.labels = o.labels;
-  if (o.summary !== undefined) patch.summary = o.summary;   // null allowed (F3)
-  if (o.context !== undefined) patch.context = o.context;   // null allowed (F3)
-  if (Object.keys(patch).length) record = model.applyTask(record, patch);
-  if (o.bodyTxtFile) {
-    const field = o.field || 'summary';
-    record = model.importBodyText(record, { field, text: readFileText(o.bodyTxtFile) });
-  }
-  return persist(record, o);
+  const input = preReadFile(o.bodyTxtFile);            // user input is read BEFORE the lock is taken
+  return withStoreLock(o.tasksDir, 'edit', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    const patch = {};
+    if (o.headline !== undefined) patch.headline = o.headline;
+    if (o.labels !== undefined) patch.labels = o.labels;
+    if (o.summary !== undefined) patch.summary = o.summary;   // null allowed (F3)
+    if (o.context !== undefined) patch.context = o.context;   // null allowed (F3)
+    if (Object.keys(patch).length) record = model.applyTask(record, patch);
+    if (o.bodyTxtFile) {
+      const field = o.field || 'summary';
+      record = model.importBodyText(record, { field, text: input() });
+    }
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /**
@@ -149,7 +195,7 @@ function opEdit(opts) {
  */
 function opImport(opts) {
   const o = opts || {};
-  const raw = o.jsonText !== undefined ? o.jsonText : readFileText(o.file);
+  const raw = o.jsonText !== undefined ? o.jsonText : readFileText(o.file);   // input read + parsed BEFORE the lock
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -159,15 +205,17 @@ function opImport(opts) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('import: JSON must be an object (editable fields OR a full task record)');
   }
-  let record = loadCurrent(o.tasksDir, o.id);
-  // Scalar editables + their edit history (applyTask ignores mechanical keys by construction).
-  record = model.applyTask(record, parsed);
-  // Subtasks: bulk-replace-by-key with prune control (the CLI's --prune drives it; default keep-missing per OQ1).
-  if (Array.isArray(parsed.subtasks)) {
-    const prune = o.prune === true;
-    record = model.importSubtasks(record, parsed.subtasks, { prune });
-  }
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, 'import', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    // Scalar editables + their edit history (applyTask ignores mechanical keys by construction).
+    record = model.applyTask(record, parsed);
+    // Subtasks: bulk-replace-by-key with prune control (the CLI's --prune drives it; default keep-missing per OQ1).
+    if (Array.isArray(parsed.subtasks)) {
+      const prune = o.prune === true;
+      record = model.importSubtasks(record, parsed.subtasks, { prune });
+    }
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /**
@@ -195,9 +243,11 @@ function opAddSubtask(opts) {
   if (o.text === undefined || o.text === null || String(o.text) === '') {
     throw new Error('add-subtask: --text "<subtask>" is required');
   }
-  let record = loadCurrent(o.tasksDir, o.id);
-  record = model.addSubtask(record, { text: o.text, key: o.key });
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, 'add-subtask', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    record = model.addSubtask(record, { text: o.text, key: o.key });
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /** opCheck({ tasksDir, id, key }) -> record — flip a subtask to done. */
@@ -206,9 +256,11 @@ function opCheck(opts) {
   if (o.key === undefined || o.key === null || String(o.key) === '') {
     throw new Error('check: a subtask key is required (`check <id> <key>` or --key <k>)');
   }
-  let record = loadCurrent(o.tasksDir, o.id);
-  record = model.checkSubtask(record, o.key);
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, 'check', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    record = model.checkSubtask(record, o.key);
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /**
@@ -220,16 +272,18 @@ function opCheck(opts) {
 function opTransition(verb, opts) {
   const o = opts || {};
   const end = { action: o.action, note: o.note, refs: o.refs };
-  let record = loadCurrent(o.tasksDir, o.id);
-  switch (verb) {
-    case 'start': record = model.startTask(record); break;
-    case 'finish': record = model.finishTask(record, end); break;
-    case 'drop': record = model.dropTask(record, end); break;
-    case 'remove': record = model.removeTask(record); break;
-    case 'reopen': record = model.reopenTask(record); break;
-    default: throw new Error(`transition: unknown verb '${verb}'`);
-  }
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, verb, () => {   // the lock releases in a finally even when finish's close-guard (#1111) throws
+    let record = loadCurrent(o.tasksDir, o.id);
+    switch (verb) {
+      case 'start': record = model.startTask(record); break;
+      case 'finish': record = model.finishTask(record, end); break;
+      case 'drop': record = model.dropTask(record, end); break;
+      case 'remove': record = model.removeTask(record); break;
+      case 'reopen': record = model.reopenTask(record); break;
+      default: throw new Error(`transition: unknown verb '${verb}'`);
+    }
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /**
@@ -264,16 +318,22 @@ function opHardRemove(opts) {
   }
 
   const jsonPath = model.bodyPathFor(o.tasksDir, id);
-  if (!fs.existsSync(jsonPath)) throw new Error(`no task #${id} found.`);
-  const mdPath = jsonPath.replace(/\.json$/, '.md');
+  return withStoreLock(o.tasksDir, 'remove --hard', () => {   // existence check -> unlink -> reindex -> views: ONE critical section
+    if (!fs.existsSync(jsonPath)) throw new Error(`no task #${id} found.`);
+    const mdPath = jsonPath.replace(/\.json$/, '.md');
 
-  fs.unlinkSync(jsonPath);                       // purge the canonical body — unrecoverable.
-  try { if (fs.existsSync(mdPath)) fs.unlinkSync(mdPath); } catch (_) { /* derived .md is disposable */ }
+    fs.unlinkSync(jsonPath);                       // purge the canonical body — unrecoverable.
+    try { if (fs.existsSync(mdPath)) fs.unlinkSync(mdPath); } catch (_) { /* derived .md is disposable */ }
 
-  // Rebuild the machine index + the three human views from the SURVIVING bodies (row now gone).
-  const idx = model.reindex(o.tasksDir);
-  model.writeIndexViews(o.tasksDir, idx, converter.renderIndexView);
-  return { id };
+    // Rebuild the machine index + the three human views from the SURVIVING bodies (row now gone). 'keep':
+    // an unrelated unreadable body keeps its old row (never dropped, never fails the purge half-done).
+    const idx = model.reindex(o.tasksDir, { onUnreadable: 'keep' });
+    model.writeIndexViews(o.tasksDir, idx, converter.renderIndexView);
+    for (const sk of idx.skipped) {
+      process.stderr.write(`tpm-task remove --hard: warning: kept the old index row for unreadable body #${sk.id} (${sk.file}): ${sk.reason}\n`);
+    }
+    return { id };
+  });
 }
 
 // ── label ops (#1071) ─────────────────────────────────────────────────────────────
@@ -283,9 +343,11 @@ function opLabel(opts) {
   const o = opts || {};
   const labels = Array.isArray(o.labels) ? o.labels : [];
   if (!labels.length) throw new Error('label: at least one label is required (`label <id> <label…>` or --label L)');
-  let record = loadCurrent(o.tasksDir, o.id);
-  record = model.addLabels(record, labels);
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, 'label', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    record = model.addLabels(record, labels);
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /** opUnlabel({ tasksDir, id, labels }) -> record — drop `labels` from the task's labels[]. */
@@ -293,9 +355,11 @@ function opUnlabel(opts) {
   const o = opts || {};
   const labels = Array.isArray(o.labels) ? o.labels : [];
   if (!labels.length) throw new Error('unlabel: at least one label is required (`unlabel <id> <label…>` or --label L)');
-  let record = loadCurrent(o.tasksDir, o.id);
-  record = model.removeLabels(record, labels);
-  return persist(record, o);
+  return withStoreLock(o.tasksDir, 'unlabel', () => {
+    let record = loadCurrent(o.tasksDir, o.id);
+    record = model.removeLabels(record, labels);
+    return persist(record, o);
+  }, { attribution: o.attribution });
 }
 
 /**
@@ -313,13 +377,21 @@ function opLabels(opts) {
   return Object.keys(map).sort().map((label) => ({ label, ids: Array.isArray(map[label]) ? map[label] : [] }));
 }
 
-/** opReindex({ tasksDir }) -> indexObj — rebuild the machine index + the human views from bodies. */
+/**
+ * opReindex({ tasksDir, dropUnreadable? }) -> indexObj — rebuild the machine index + the human views from bodies,
+ * holding the lock for the whole run. FAILS LOUD (B1(b)/#1172): a body that cannot be loaded (unknown-newer
+ * schemaVersion, corrupt, invalid) makes the verb REFUSE with the list of what it would drop and write nothing;
+ * `dropUnreadable: true` (CLI `--drop-unreadable`) is the ONLY way to discard such rows. The returned index carries a
+ * non-enumerable `skipped` array (count + names) the CLI prints.
+ */
 function opReindex(opts) {
   const o = opts || {};
   if (!o.tasksDir) throw new Error('reindex: --tasks-dir <dir> is required');
-  const idx = model.reindex(o.tasksDir);
-  model.writeIndexViews(o.tasksDir, idx, converter.renderIndexView);
-  return idx;
+  return withStoreLock(o.tasksDir, 'reindex', () => {
+    const idx = model.reindex(o.tasksDir, { onUnreadable: o.dropUnreadable === true ? 'drop' : 'refuse' });
+    model.writeIndexViews(o.tasksDir, idx, converter.renderIndexView);
+    return idx;
+  }, { create: true });
 }
 
 /** opHistory({ tasksDir, id }) -> event[] — the read-only #1109 history surface. */
@@ -346,6 +418,20 @@ function opList(opts) {
       return want.every((l) => have.includes(String(l)));
     });
     idx = Object.assign({}, idx, { tasks: rows });
+  }
+  if (o.session) {   // list --session: derived by scanning each task's history; nothing extra is stored
+    const kept = [];
+    const skipped = [];
+    for (const r of (Array.isArray(idx.tasks) ? idx.tasks : [])) {
+      let rec;
+      try { rec = loadCurrent(o.tasksDir, r.id); } catch (_e) { skipped.push(r.id); continue; }
+      const hist = Array.isArray(rec.history) ? rec.history : [];
+      if (hist.some((ev) => ev && attribution.sessionMatches(ev.session, o.session))) kept.push(r);
+    }
+    if (skipped.length) {
+      process.stderr.write(`tpm-task list: skipped ${skipped.length} unreadable task(s) (--session needs their history): ${skipped.map((i) => '#' + i).join(', ')}\n`);
+    }
+    idx = Object.assign({}, idx, { tasks: kept });
   }
   return converter.renderIndexView(idx, { states, now: o.now || nowIsoTz() });
 }
@@ -401,6 +487,17 @@ function readFileText(file) {
   }
 }
 
+/**
+ * preReadFile(file) -> () => text — read a user input file NOW (before the lock) but defer its error until the
+ * op's original point of use, so error precedence (e.g. bad headline vs. missing file) is unchanged.
+ */
+function preReadFile(file) {
+  if (!file) return () => { throw new Error('a file path is required'); };
+  let text; let err;
+  try { text = readFileText(file); } catch (e) { err = e; }
+  return () => { if (err) throw err; return text; };
+}
+
 // stdin read (for `import` with no --file) — returns '' when nothing is piped.
 function readStdin() {
   try {
@@ -454,6 +551,8 @@ function parseArgs(argv) {
       else if (a === '--config') globals.config = val();
       else if (a === '--history') globals.history = val();
       else if (a === '--now') globals.now = val();
+      else if (a === '--session') globals.session = val();
+      else if (a === '--track') globals.track = val();
       else if (SUBCOMMANDS.includes(a) || PHASE07.includes(a)) sub = a;
       else if (a.startsWith('-')) throw new Error(`unknown global flag '${a}'`);
       else { globals.badSub = a; sub = '__bad__'; }
@@ -465,6 +564,8 @@ function parseArgs(argv) {
       case '--config': globals.config = val(); break;
       case '--history': globals.history = val(); break;
       case '--now': globals.now = val(); break;
+      case '--session': globals.session = val(); break;
+      case '--track': globals.track = val(); break;
       case '--headline': args.headline = val(); break;
       case '--label': args.labels.push(val()); break;
       case '--labels': args.labelsCsv = val(); break;
@@ -484,6 +585,7 @@ function parseArgs(argv) {
       case '--state': args.state = val(); break;
       case '--json': args.json = true; break;
       case '--id': args.id = val(); break;
+      case '--drop-unreadable': args.dropUnreadable = true; break;   // reindex: the ONLY way to discard unreadable rows (B1(b))
       case '--hard': args.hard = true; break;    // remove --hard: config-gated permanent purge (#1086)
       default:
         if (a.startsWith('-')) throw new Error(`unknown flag '${a}'`);
@@ -504,9 +606,13 @@ Common:  --tasks-dir <dir>   the task store (a SCRATCH or real dir). OPTIONAL (F
                              (default: <root>/.claude/…/config.json)
          --history on|off    override the history gate for this run
          --now <iso>         reference time for list/show ages (default: now, local offset)
+         --session <ref> [--track <letter>]
+                             attribute this change to a tpm session (0012, 0012b, 12b, session-0012b; overrides
+                             TPM_SESSION_ID and the Claude-id lookup; stored as session-0012b, track a as session-0012).
+                             On list it FILTERS by session instead (a bare number matches every track; a letter pins).
 
 Verbs:
-  list          [--state open|in-progress|finished|dropped|removed|all] [--label L]…  (--label is AND)
+  list          [--state open|in-progress|finished|dropped|removed|all] [--label L]… [--session <ref>]  (--label is AND)
   show          <selector> [--state <s>]   selector: all | <id> | <id>,<id>,… | <lo>-<hi> (asc; sparse
                    ranges skip; nothing-matched → "(no matching tasks)"). Default pool open+in-progress;
                    --state widens (e.g. "show all --state all"). Renders each selected body.
@@ -526,7 +632,8 @@ Verbs:
   drop          <id> [--reason "…"] [--note "…"] [--ref "…"]…  --ref repeatable → endAction.refs[] (#1074)
   remove        <id> [--hard]                                 soft-stash → removed (recoverable); --hard PURGES the body (config-gated: tasks.allowHardDelete)
   reopen        <id>
-  reindex                                                     rebuild tasks-index.json + human views
+  reindex       [--drop-unreadable]                           rebuild tasks-index.json + human views; REFUSES (lists them, writes nothing) if any body is unreadable
+                                                              (e.g. from a newer tpm); --drop-unreadable discards those rows from the index
   history       <id> [--json]                                 read the #1109 history events
 
 Every mutation writes the canonical task-<id>.json atomically, then regenerates the derived body .md,
@@ -572,13 +679,23 @@ function labelArgsFor(args) {
   return fromPositional.concat(fromFlags);
 }
 
+const EVENT_VERBS = new Set(['add', 'edit', 'import', 'add-subtask', 'check', 'start', 'finish', 'drop', 'remove', 'reopen', 'label', 'unlabel']);
+
 function dispatch(sub, globals, args) {
   const tasksDir = globals.tasksDir;
   const now = globals.now;
   const common = { tasksDir, now };
+  // Resolve the session ONCE, before any lock, only for verbs that write a history event and only when the
+  // history gate is on. The resolver never throws and never prints; its answer is data on the event.
+  if (EVENT_VERBS.has(sub) && !(sub === 'import' && args.template) && !(sub === 'remove' && args.hard)
+      && model.isHistoryEnabled()) {
+    common.attribution = attribution.resolveAttribution({ explicit: globals.explicitRef ? globals.explicitRef.stored : undefined });
+  }
   switch (sub) {
     case 'list':
-      process.stdout.write(opList({ tasksDir, states: statesFor(args.state), labels: collectLabels(args), now }));
+      process.stdout.write(opList({
+        tasksDir, states: statesFor(args.state), labels: collectLabels(args), now, session: globals.explicitRef || undefined,
+      }));
       return 0;
     case 'show': {
       // #1132: selector support — `all` / range / comma-list / bare id, via the shared core. A legacy
@@ -657,8 +774,12 @@ function dispatch(sub, globals, args) {
       return 0;
     }
     case 'reindex': {
-      const idx = opReindex(common);
+      const idx = opReindex(Object.assign({ dropUnreadable: !!args.dropUnreadable }, common));
       process.stderr.write(`tpm-task reindex: rebuilt index for ${idx.tasks.length} task(s); nextId ${idx.nextId}.\n`);
+      if (idx.skipped.length) {   // --drop-unreadable only: ALWAYS list what was discarded (count + names)
+        process.stderr.write(`tpm-task reindex: DROPPED ${idx.skipped.length} unreadable body(ies) from the index (--drop-unreadable); the body files remain on disk:\n` +
+          idx.skipped.map((s) => `  - #${s.id} (${s.file}): ${s.reason}`).join('\n') + '\n');
+      }
       return 0;
     }
     case 'history': {
@@ -680,11 +801,15 @@ function dispatch(sub, globals, args) {
 
 function formatHistory(ev) {
   const at = ev.at || '?';
-  if (ev.op === 'create') return `${at}  create`;
-  if (ev.op === 'edit') return `${at}  edit ${ev.field}`;
-  if (ev.op === 'state') return `${at}  state ${ev.from} → ${ev.to}`;
-  if (ev.op === 'subtask') return `${at}  subtask ${ev.key} ${ev.action}`;
-  return `${at}  ${ev.op || '?'}`;
+  let line;
+  if (ev.op === 'create') line = `${at}  create`;
+  else if (ev.op === 'edit') line = `${at}  edit ${ev.field}`;
+  else if (ev.op === 'state') line = `${at}  state ${ev.from} → ${ev.to}`;
+  else if (ev.op === 'subtask') line = `${at}  subtask ${ev.key} ${ev.action}`;
+  else line = `${at}  ${ev.op || '?'}`;
+  // Attribution, rendered AS STORED (e.g. session-0012b); lines without the key are byte-identical to before.
+  if (typeof ev.session === 'string' && ev.session) line += `  [${ev.session}]`;
+  return line;
 }
 
 /**
@@ -700,6 +825,41 @@ function prefixOnce(prefix, msg) {
   const esc = bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp('^' + esc + '(?:[ \\t][\\w-]+)?:\\s*');
   return prefix + String(msg == null ? '' : msg).replace(re, '');
+}
+
+/**
+ * assertNotOldFormatStore(tasksDir) — #1114.B rollout guard.
+ *
+ * REFUSES every JSON task verb when the resolved store is a CLEAN un-migrated 0.1.0 markdown store —
+ * detectStore (the ONE old-format detector, shared with the doctor) positively recognises a
+ * `bodies/<lo>-<hi>/task-<id>.md` tree with NO JSON body and NO tasks-index.json. Running a mutating
+ * verb there would seed a FRESH JSON store whose id counter resets to the start, silently colliding
+ * with / overwriting the old tasks (the exact incident this guards against); a read verb there would
+ * show a deceptive empty store. The fix is to migrate first (into a staging dir, then promote).
+ *
+ * detectStore THROWS (MigrateError) for an already-migrated / empty / non-store / variant dir — in
+ * that case we do NOTHING and the verb runs exactly as before. We block ONLY on a POSITIVE old-store
+ * detection, so a false positive is impossible and a detector hiccup can never brick the tool
+ * (fail-open on any throw). A fresh empty project store (no bodies yet) is NOT an old store → `add`
+ * still works to mint the first task.
+ */
+function assertNotOldFormatStore(tasksDir) {
+  if (!tasksDir) return;
+  let store;
+  try {
+    store = detectStore(tasksDir);
+  } catch (_) {
+    return; // not a clean old store (already migrated / empty / variant) — proceed unchanged.
+  }
+  const n = Array.isArray(store.bodies) ? store.bodies.length : 0;
+  throw new Error(
+    `this task store has NOT been migrated to the JSON format — it is a 0.1.0 markdown store ` +
+    `(${n} task ${n === 1 ? 'body' : 'bodies'} at ${tasksDir}).\n` +
+    `The JSON task verbs refuse to run against it: seeding a fresh JSON store here would reset the id ` +
+    `counter and overwrite your existing tasks. Migrate it first (into a staging dir, then promote):\n` +
+    `  tpm task migrate --in "${tasksDir}" --out-dir "<staging-dir>" --emit-derived\n` +
+    `then move the staging store into place. Run \`tpm task doctor\` to confirm the format.`,
+  );
 }
 
 function main(argv) {
@@ -726,12 +886,19 @@ function main(argv) {
   if (globals.badSub) { process.stderr.write(`tpm-task: unknown verb '${globals.badSub}' — see --help.\n`); return 2; }
   if (args.help) { process.stdout.write(USAGE + '\n'); return 0; }
 
+  // Session attribution flags: a malformed / disagreeing / valueless explicit value is a USAGE error, refused
+  // here BEFORE the history gate, the lock or any write (nothing is ever written on exit 2).
+  const explicit = attribution.parseExplicit({ session: globals.session, track: globals.track });
+  if (!explicit.ok) { process.stderr.write('tpm-task: ' + explicit.error + '\n\n' + USAGE + '\n'); return 2; }
+  globals.explicitRef = explicit.ref;
+
   applyHistoryGate(globals);
   try {
     // F4: --tasks-dir is OPTIONAL — resolve it (flag > local project config.json > FAIL LOUD). Every
     // verb needs a store EXCEPT `import --template` (which only emits a skeleton to stdout).
     if (!(sub === 'import' && args.template)) {
       globals.tasksDir = config.resolveTasksDir(globals.tasksDir, globals.config).tasksDir;
+      assertNotOldFormatStore(globals.tasksDir); // #1114.B: refuse JSON verbs on an un-migrated 0.1.0 store
     }
     return dispatch(sub, globals, args);
   } catch (e) {
@@ -751,7 +918,9 @@ module.exports = {
   opLabel, opUnlabel, opLabels,
   // helpers (exported for tests)
   persist, loadCurrent, blankTemplate, collectLabels, labelArgsFor, statesFor, parseArgs,
-  resolveSubtaskKey, prefixOnce, main,
+  resolveSubtaskKey, prefixOnce, assertNotOldFormatStore, main,
+  // the store lock (exported for tests / the doctor's wiring checks)
+  withStoreLock, lockDirFor, TPM_VERSION,
 };
 
 if (require.main === module) {

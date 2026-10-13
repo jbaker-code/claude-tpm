@@ -42,6 +42,7 @@ const VERBS = {
   note: 'tpm-session-ops.js',
   punchlist: 'tpm-session-ops.js',
   close: 'tpm-session-ops.js',
+  unseal: 'tpm-session-ops.js',
   'import-handoff': 'tpm-session-ops.js',
   'import-log': 'tpm-session-ops.js',
   'import-punchlist': 'tpm-session-ops.js',
@@ -52,14 +53,14 @@ const VERBS = {
   doctor: 'tpm-session-doctor.js',    // #1119 READ-ONLY validate + hash-drift + detect/suggest-migrate
   config: 'tpm-session-config.js',    // #1123 restored: session config resolver (--json/--get/--sessions-dir/--modules)
   current: 'tpm-session-current.js',  // #1123 restored: current-session pointer (--state/--open/--seal/--next-number)
-  'boot-read': 'tpm-session-boot-read.js', // #1123 reworked: JSON-first boot pickup emitter (always exit 0)
+  'boot-read': 'tpm-session-boot-read.js', // #1123 reworked: JSON-first boot pickup emitter (exit 0 for any valid invocation; malformed usage e.g. --track with no value exits 2)
   compose: 'tpm-session-compose.js',  // #1155 the tpm-session composer: --mode open|save|close|info (read-only, always exit 0)
 };
 
 // The promoted ops sub-verbs (flatten): the router injects the matched verb as argv[0] to the ops tool
 // (mirror of how `review` injects `--style human`). tpm-session-ops.js still parses `<subverb> …`.
 const OPS_VERBS = new Set([
-  'open', 'save', 'note', 'punchlist', 'close',
+  'open', 'save', 'note', 'punchlist', 'close', 'unseal',
   'import-handoff', 'import-log', 'import-punchlist',
 ]);
 
@@ -74,7 +75,8 @@ Notes-write verbs (promoted from the removed 'ops' grouping — call them direct
   save       re-persist the current session (re-stamp handoff.updatedAt, regenerate the .md)
   note       append ONE log entry (--log --status TAG --text "…" | --decision --what "…" --why "…")
   punchlist  add/close/reopen/drop/carry-in a work item (--action …)
-  close      seal the session (REFUSES unless a handoff AND a punchlist are both present)
+  close      seal YOUR track (REFUSES unless a handoff AND a punchlist are both present); with --track <other letter> --even-if-running, the abandoned seal of a dead instance's track
+  unseal     undo another instance's seal of a track (--session NNNN --track x); ask the person first
   import-handoff   REPLACE the handoff from a file (--json-file <f> | --txt-file/--file <f> --next "…")
   import-log       APPEND a log addendum from a file (--txt-file/--file <f>)
   import-punchlist ADD punchlist items from a file (--file/--txt-file <f>)
@@ -86,7 +88,7 @@ Other verbs:
   doctor     #1119 READ-ONLY health check: validate + hash-drift + detect/suggest-migrate (--sessions-dir)
   config     session config resolver (--json / --get <k> / --sessions-dir / --modules)
   current    current-session pointer (--state / --open / --seal / --next-number · --sessions-dir)
-  boot-read  JSON-first boot pickup emitter — prior handoff + open punchlist (always exits 0)
+  boot-read  JSON-first boot pickup emitter — prior handoff + open punchlist (exits 0 for any valid invocation, corrupt store included; --track with no value exits 2)
   compose    compose the tpm-session procedure for a mode (--mode open|save|close|info|auto; read-only, always exits 0)
 
 Session numbers are ALWAYS 4-digit zero-padded (--session 1 ≡ --session 0001; folder + meta agree).

@@ -10,7 +10,7 @@
  *
  * ── WHAT IS RE-EXPORTED ── the 9 kind-agnostic base modules + the shared `paths` (#1058):
  *   io · envelope · version · validate · update · normalize · timestamp · exportScaffold ·
- *   hash (renamed from session-hash, §5 R-a) · paths (new shared, §5 R-b).
+ *   hash (renamed from session-hash, §5 R-a) · paths (new shared, §5 R-b) · lock · identity (multi-session).
  * The three kind-SPECIFIC modules (task-schema / task-model / task-converter) are NOT here —
  * they live under task-tooling/lib/ and are built by phases 03–05.
  *
@@ -44,6 +44,9 @@ const MODULES = {
   exportScaffold: 'export-scaffold',
   hash:           'hash',        // ← renamed from session-hash (§5 R-a)
   paths:          'paths',       // ← new shared paths module (§5 R-b)
+  lock:           'lock',        // ← the shared directory lock (multi-session support; callers use it through the namespace)
+  identity:       'identity',    // ← the Claude session/pid identity reader (lock.js's sibling)
+  attribution:    'attribution', // ← the shared session-attribution resolver (task history; workflow stamps later)
 };
 
 const exported = {};

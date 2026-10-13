@@ -74,13 +74,40 @@ test('openSession is idempotent — a second call returns the SAME number + isNe
   assert.strictEqual(second.isNew, false);
 });
 
+// Test helper: seal the lone record the way `close` does (stamp meta.closedAt on the track's own record).
+function closeRecord(recordPath) {
+  const model = require('../lib/session-model');
+  model.saveSession(model.closeSession(model.loadSession(recordPath)), { jsonPath: recordPath });
+}
+
 test('sealSession stamps closedAt and flips resolveCurrentSession back to not-opened', () => {
   const dir = tmpDir('cur-seal-');
   const opened = cs.openSession({ sessionsDir: dir });
+  closeRecord(opened.recordPath);   // tracks store: --seal closes the hint only when no track is unsealed
   const sealed = cs.sealSession({ sessionsDir: dir });
   assert.strictEqual(sealed.number, opened.number);
   assert.ok(sealed.closedAt, 'closedAt stamped');
   assert.strictEqual(cs.resolveCurrentSession({ sessionsDir: dir }).state, 'not-opened');
+});
+
+test('--open now creates the session FOLDER and the track-a RECORD (the documented boot flaw: record never created)', () => {
+  const dir = tmpDir('cur-open-creates-');
+  const r = cs.openSession({ sessionsDir: dir });
+  assert.ok(fs.existsSync(path.join(dir, 'session-0001', 'session-0001.json')), 'record created, track a unsuffixed');
+  assert.ok(fs.existsSync(path.join(dir, 'session-0001', 'session-0001.md')), 'derived md created');
+  assert.strictEqual(r.track, 'a');
+  assert.strictEqual(r.recordPath, path.join(dir, 'session-0001', 'session-0001.json'));
+});
+
+test('--seal while a track is still unsealed leaves the HINT open (DoD E: no blind stamp)', () => {
+  const dir = tmpDir('cur-seal-open-');
+  cs.openSession({ sessionsDir: dir });
+  const sealed = cs.sealSession({ sessionsDir: dir });
+  assert.strictEqual(sealed.hintClosed, false);
+  assert.strictEqual(sealed.closedAt, null);
+  assert.deepStrictEqual(sealed.unsealed, [{ number: '0001', track: 'a' }]);
+  const hint = JSON.parse(fs.readFileSync(path.join(dir, '.current-session.json'), 'utf8'));
+  assert.strictEqual(hint.closedAt, null);
 });
 
 test('sealSession throws ENOTHING_OPEN when nothing is open', () => {
@@ -114,7 +141,9 @@ test('CLI --next-number prints the allocation with NO side effect', () => {
 
 test('CLI --open then --seal then --state round-trips to not-opened', () => {
   const dir = tmpDir('cur-cli-life-');
-  assert.strictEqual(runCli(['--sessions-dir', dir, '--open']).code, 0);
+  const opened = runCli(['--sessions-dir', dir, '--open']);
+  assert.strictEqual(opened.code, 0);
+  closeRecord(JSON.parse(opened.stdout).recordPath);
   assert.strictEqual(runCli(['--sessions-dir', dir, '--seal']).code, 0);
   const stateR = runCli(['--sessions-dir', dir, '--state']);
   assert.strictEqual(JSON.parse(stateR.stdout).state, 'not-opened');

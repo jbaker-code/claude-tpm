@@ -30,6 +30,9 @@ function cleanEnv() {
   delete env.TPM_PROJECT_ROOT;
   delete env.TPM_HOME;
   delete env.CLAUDE_PROJECT_DIR; // the spawn gate reads it; a live session's value must never reach a test
+  delete env.CLAUDE_CODE_SESSION_ID; // identity vars: a live session's values must never reach a test (lib/identity.js reads them)
+  delete env.CLAUDE_PID;
+  delete env.TPM_SESSION_ID;
   return env;
 }
 
@@ -43,6 +46,7 @@ const SUITES = [
   'tpm-workflow-scaffold-config/tests/scaffold-subagent/test.js',
   'tpm-workflow-signoff-gate/test.js',
   'tpm-workflow-root-env/test.js',
+  'tpm-workflow-attribution/test.js',
 ];
 
 function main() {

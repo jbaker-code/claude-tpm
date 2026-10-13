@@ -58,7 +58,7 @@
  *   --emit-md        Also write the derived human-readable session-<NNNN>.md (via the converter). DEFAULT: on.
  *   --no-emit-md     Opt OUT of the derived .md — write only the canonical .json.
  *   --force          Overwrite an existing output file (otherwise refuse if it exists).
- *   --now <iso>      Reference stamp for handoff.updatedAt (default: now, local offset). Injectable
+ *   --now <iso>      Overrides handoff.updatedAt (default: the source's latest timestamp, now only if it has none). Injectable
  *                    so goldens are byte-stable.
  *   --help           Show this usage.
  *
@@ -70,6 +70,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const { atomicWriteFileSync } = require('../lib/io');
 const { KNOWN_KINDS, writeEnvelope } = require('../lib/envelope');
 const { validateEnvelope } = require('../lib/validate');
 const { validatePayload, SESSION_KIND, isIsoTz } = require('./lib/session-schema');
@@ -104,12 +105,25 @@ function refuse(msg) { throw new MigrateError(msg); }
  *     notes.md / any *.txt / any other *.md) in the directory.
  * Anything else is REFUSED with a message naming what disqualified it.
  */
+const TRACK_RECORD_RE = /^session-\d+(?:-[b-z])?\.(json|sealed)$/;
+const SIBLING_TRACK_RE = /^session-\d+-[b-z]\.(json|md|sealed)$|^session-\d+\.sealed$/;
+
 function detectShape(inDir) {
   let names;
   try {
     names = fs.readdirSync(inDir);
   } catch (e) {
     refuse(`cannot read --in '${inDir}': ${e.message}`);
+  }
+  // A folder of TRACK records is the CURRENT format (session-NNNN.json = track a, session-NNNN-b.json … = b..z, plus
+  // .sealed markers). It is never a migration source: say so instead of calling it "mixed/pre-format". A folder that
+  // still holds the legacy marked trio is judged as before.
+  const trackRecords = names.filter((n) => TRACK_RECORD_RE.test(n));
+  if (trackRecords.length && !names.some((n) => /^session-\d+-(handoff|log|punchlist)\.md$/.test(n))) {
+    refuse(
+      `refusing '${inDir}': this is a current-format session folder (${trackRecords.length} track record file(s): ` +
+      `${trackRecords.slice(0, 6).join(', ')}${trackRecords.length > 6 ? ', ...' : ''}); there is nothing to migrate and nothing was touched.`,
+    );
   }
   const mdFiles = names.filter((n) => n.toLowerCase().endsWith('.md'));
   const txtFiles = names.filter((n) => n.toLowerCase().endsWith('.txt'));
@@ -384,6 +398,20 @@ function earliestTs(log, punchlist) {
   return stamps[0];
 }
 
+/** latestTs(log, punchlist, sidecar) -> the latest REAL ISO-TZ stamp in the source, or null (never synthesized). */
+function latestTs(log, punchlist, sidecar) {
+  const stamps = [];
+  for (const e of log) if (isIsoTz(e.ts)) stamps.push(e.ts);
+  for (const it of punchlist) {
+    if (isIsoTz(it.createdAt)) stamps.push(it.createdAt);
+    for (const ev of it.events || []) if (isIsoTz(ev.ts)) stamps.push(ev.ts);
+  }
+  if (sidecar) for (const k of ['openedAt', 'closedAt']) if (isIsoTz(sidecar[k])) stamps.push(sidecar[k]);
+  if (!stamps.length) return null;
+  stamps.sort((a, b) => Date.parse(b) - Date.parse(a));
+  return stamps[0];
+}
+
 // ── the parse → payload assembler ────────────────────────────────────────────
 
 /**
@@ -396,7 +424,10 @@ function parseOldSession(opts) {
   const options = opts || {};
   const inDir = options.inDir;
   if (!inDir) refuse('parseOldSession: inDir is required');
-  const now = options.now || nowIsoTz();
+  // handoff.updatedAt: an injected --now wins (the golden pins it). Otherwise carry the SOURCE's real last-write
+  // time so a migrated legacy session is not stamped "just now" (which made it look left-open in a later pickup);
+  // fall back to now only when the source holds no real stamp.
+  let now = options.now;
 
   const shape = detectShape(inDir);
   const bannerNumber = shape.number;
@@ -458,6 +489,11 @@ function parseOldSession(opts) {
     notes.push('meta.closedAt = null (no real close timestamp; SEALED date-only is not synthesized)');
   }
 
+  if (!now) {
+    now = latestTs(log, punchlist, sidecar);
+    if (now) notes.push(`handoff.updatedAt = latest real source timestamp (${now}), not the migration time`);
+    else { now = nowIsoTz(); notes.push('handoff.updatedAt = migration time (the source holds no real timestamp)'); }
+  }
   const handoff = parseHandoff(handoffText, now);
   if (!handoff) notes.push('handoff = null (source lacked a usable Where/Next)');
 
@@ -503,7 +539,7 @@ function looksLikeLiveSessions(outDir) {
  *   opts.emitMd    — also write the derived session-<NNNN>.md via the converter. DEFAULT true; pass
  *                    `false` (CLI `--no-emit-md`) to opt out.
  *   opts.force     — overwrite an existing output file.
- *   opts.now       — reference stamp for handoff.updatedAt (default nowIsoTz(); injectable).
+ *   opts.now       — overrides handoff.updatedAt (default: the source's latest log/punchlist/sidecar timestamp, nowIsoTz() only if none; injectable).
  *   opts.loadSession — injected loader (default session-model.loadSession) for the post-write check.
  */
 function runMigration(opts) {
@@ -532,6 +568,20 @@ function runMigration(opts) {
   const emitMd = options.emitMd !== false;
   const mdPath = emitMd ? path.join(sessionDir, `session-${record.meta.number}.md`) : null;
 
+  // Migrating INTO a session folder that already holds other tracks (parallel instances) or a seal marker would
+  // plant an unowned live track a beside them. Refused explicitly, even with --force: pick a different --out-dir
+  // (or number) instead. A folder holding only a previous migration of this session (track a) is still fine.
+  let existing = [];
+  try { existing = fs.readdirSync(sessionDir); } catch (_e) { /* the folder does not exist yet */ }
+  const siblings = existing.filter((n) => SIBLING_TRACK_RE.test(n));
+  if (siblings.length) {
+    refuse(
+      `refusing to migrate into '${sessionDir}': it already holds other track file(s) (${siblings.slice(0, 6).join(', ')}` +
+      `${siblings.length > 6 ? ', ...' : ''}). A migrated session would add an unowned track a beside live or sealed tracks. ` +
+      'Nothing was written; choose a different --out-dir.',
+    );
+  }
+
   if (!options.dryRun) {
     if (fs.existsSync(outPath) && !options.force) {
       refuse(`output '${outPath}' already exists — pass --force to overwrite.`);
@@ -540,7 +590,7 @@ function runMigration(opts) {
     writeEnvelope(outPath, record); // ATOMIC canonical write
     if (mdPath) {
       const now = options.now || nowIsoTz();
-      fs.writeFileSync(mdPath, render(record, { now }));
+      atomicWriteFileSync(mdPath, render(record, { now })); // derived .md — atomic
     }
     // Round-trip proof: the file we just wrote loads cleanly through the canonical load path.
     const load = typeof options.loadSession === 'function' ? options.loadSession : loadSession;
@@ -594,7 +644,7 @@ const USAGE = `tpm-session-migrate — OPT-IN old→new session migrator (#1114.
   --emit-md        also write the derived human-readable session-<NNNN>.md (DEFAULT: on)
   --no-emit-md     opt OUT of writing the derived .md (write only the canonical .json)
   --force          overwrite an existing output file
-  --now <iso>      reference stamp for handoff.updatedAt (default: now, local offset)
+  --now <iso>      overrides handoff.updatedAt (default: source's latest timestamp; now only if it has none)
   --help           show this usage
 
 Convert-on-demand ONLY: one explicit target per run; NO scan-and-auto-convert (that suggest-only

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "session",
+  "meta": {
+    "number": "0021",
+    "sessionIds": [
+      "65bf4713-0000-4000-8000-000000000001"
+    ],
+    "openedAt": "2026-09-19T07:36:00-07:00",
+    "closedAt": null,
+    "tpmVersion": "0.0.0",
+    "track": "b",
+    "claudeSessionId": "65bf4713-0000-4000-8000-000000000001",
+    "claudePid": 99,
+    "claudePidStartedAt": "2026-09-19T07:40:00-07:00",
+    "hostname": "dev-host",
+    "lastWriter": {
+      "version": "0.2.0-dev",
+      "at": "2026-09-19T13:36:00-07:00"
+    }
+  },
+  "handoff": {
+    "where": "Base lib promoted; session model + converter landing in the shared sandbox.",
+    "next": "Wire the converter into the export tool (P05).",
+    "in_flight": [
+      "P04 converter golden under review"
+    ],
+    "must_not_redo": [
+      "Re-deriving the payload nesting — it is LOCKED to top-level siblings.",
+      "Reading the clock inside render — now is injected."
+    ],
+    "updatedAt": "2026-09-19T13:36:00-07:00"
+  },
+  "log": [
+    {
+      "seq": 1,
+      "ts": "2026-09-19T07:36:00-07:00",
+      "type": "log",
+      "status": "NOTE",
+      "text": "Session 0021 opened; 20 prior sessions on disk."
+    }
+  ],
+  "punchlist": []
+}

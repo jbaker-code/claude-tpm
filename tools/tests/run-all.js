@@ -32,6 +32,9 @@ function cleanEnv() {
   delete env.TPM_PROJECT_ROOT;
   delete env.TPM_HOME;
   delete env.CLAUDE_PROJECT_DIR; // the spawn gate reads it; a live session's value must never reach a test
+  delete env.CLAUDE_CODE_SESSION_ID; // identity vars: a live session's values must never reach a test (lib/identity.js reads them)
+  delete env.CLAUDE_PID;
+  delete env.TPM_SESSION_ID;
   return env;
 }
 
@@ -68,6 +71,7 @@ const TARGETS = [
   'tests/tpm-doc-examples.test.js',
   'tests/tpm-npx-regression-guard.test.js',
   'tests/tpm-env-leak-guard.test.js',
+  'tests/tpm-attribution-lockin.test.js',
   'misc/fix-git-rename/tests/tpm-fix-git-rename-refs/test.js',
 ];
 

@@ -33,6 +33,7 @@
  *       one epic-level token (`--round <epic-path>`) with every phase marker set to `phase="<epic-path>"`.
  *   tpm workflow signoff check --gate spawn|questions [--roster "…"] [--round "…"] [--max-age <sec>]
  *                                                          # exit 0 if a FRESH matching token exists, else 1
+ *       --session <ref> / --track <letter>  (questions|spawn) attribute the token to a session (0012b, or 0012 --track b); default: auto-resolved
  *   tpm workflow signoff status                                 # print both tokens' freshness (human-readable)
  *   tpm workflow signoff clear                                  # remove ALL tokens: questions + every per-round spawn (round done / reset)
  *   tpm workflow signoff --help
@@ -51,6 +52,8 @@ const path = require('path');
 const crypto = require('crypto');
 // #1133 — shared root resolver (deliberate cross-suite exception; see findProjectRoot below).
 const { findRoot } = require('../lib/paths');
+// Phase 18 — informational session stamp (shared resolver; never throws, never blocks). Keys tpmSession/tpmSessionVia, NOT `session`.
+const { resolveAttribution, toEventFields, parseExplicit } = require('../lib/attribution');
 
 const DEFAULT_MAX_AGE_SEC = 1800; // 30 min
 const GATES = ['questions', 'spawn'];
@@ -79,7 +82,7 @@ function tokenPath(gate, root, round) {
 }
 
 // ── write a token ───────────────────────────────────────────────────────────
-function writeToken(gate, { roster, root, now, round } = {}) {
+function writeToken(gate, { roster, root, now, round, explicit } = {}) {
   if (!GATES.includes(gate)) throw new Error(`unknown gate "${gate}" (expected: ${GATES.join(', ')}).`);
   const r = root || findProjectRoot();
   // "spawn" requires that a "questions" token EXISTS — you cannot confirm a kickoff for a roster the
@@ -112,6 +115,11 @@ function writeToken(gate, { roster, root, now, round } = {}) {
     // every real round spawn, so a token for round A can't wave through round B (verifier concern #1).
     round: roundNorm,
   };
+  // Informational only (nothing reads these; isFresh compares sessionId, never tpmSession). Blank -> keys omitted.
+  try {
+    const f = toEventFields(resolveAttribution({ explicit }));
+    if (f.session) { token.tpmSession = f.session; token.tpmSessionVia = f.sessionVia; }
+  } catch (_e) { /* stamping never blocks */ }
   fs.writeFileSync(tokenPath(gate, r, roundNorm), JSON.stringify(token, null, 2) + '\n');
   return token;
 }
@@ -181,6 +189,8 @@ function parseArgs(argv) {
     if (x === '-h' || x === '--help') a.help = true;
     else if (x === '--roster') { a.roster = argv[i + 1]; i += 1; }
     else if (x === '--round') { a.round = argv[i + 1]; i += 1; }
+    else if (x === '--session') { a.session = argv[i + 1]; i += 1; }
+    else if (x === '--track') { a.track = argv[i + 1]; i += 1; }
     else if (x === '--gate') { a.gate = argv[i + 1]; i += 1; }
     else if (x === '--max-age') { a.maxAge = parseInt(argv[i + 1], 10); i += 1; }
     else if (x.startsWith('--')) { process.stderr.write(`Unknown flag: ${x}\n`); process.exit(2); }
@@ -199,9 +209,15 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args._[0]) { printHelp(); process.exit(args.help ? 0 : 1); }
   const cmd = args._[0];
+  let explicit = null;
+  if (args.session !== undefined || args.track !== undefined) {
+    const x = parseExplicit({ session: args.session, track: args.track });
+    if (!x.ok) { process.stderr.write(`signoff: ${x.error}\n`); process.exit(2); }
+    explicit = x.ref;
+  }
   try {
     if (cmd === 'questions' || cmd === 'spawn') {
-      const t = writeToken(cmd, { roster: args.roster, round: args.round });
+      const t = writeToken(cmd, { roster: args.roster, round: args.round, explicit });
       process.stdout.write(`✓ wrote "${cmd}" sign-off token (${t.iso})${t.round ? ` for round: ${t.round}` : ''}${t.roster ? ` — ${t.roster}` : ''}\n`);
     } else if (cmd === 'check') {
       const gate = args.gate;

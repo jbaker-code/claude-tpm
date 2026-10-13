@@ -15,15 +15,16 @@ none of them.
 tpm session export [flags]
 ```
 Programmatic callers `require('./tpm-session-export')` for `exportSessions(opts)` (plus helpers
-`resolveRecords`, `enumerateSessions`, `normalizeStyles`, `padNumber`).
+`resolveRecords`, `resolveUnits`, `sessionNumbers`, `enumerateSessions`, `normalizeStyles`, `padNumber`).
 
 ## Flags
 
 | Flag | Meaning |
 |------|---------|
 | `--sessions-dir <dir>` | directory of `session-<NNNN>.json` (a SCRATCH or real dir). **Optional:** omitted, it is resolved from the project root's `.claude/claude-tpm/config.json` (`session.notes.sessionsDir`); the flag overrides. |
-| `--last N` | export the N most-recent sessions, **newest first**. |
-| `--session <NNNN>[,NNNN] …` | explicit selector list (repeatable / comma-list) — the `#1092` seam, resolved in the order given; no re-matching. |
+| `--last N` | export the N most-recent **sessions** (a session with several tracks counts once), **newest first**. |
+| `--track <letter\|id>` | narrow every selected session to ONE track: a letter `a`-`z`, or at least 8 characters of its owner's Claude session id (case-insensitive). An unknown value is an error (`ENO_TRACK`, exit 1), a malformed one is `ETRACK_SELECTOR` (exit 2) - never an empty result. A sealed or unreadable track is selectable. |
+| `--session <NNNN>[,NNNN] …` | explicit selector list (repeatable / comma-list) — the `#1092` seam, resolved in the order given; no re-matching. A number only: `0001b` is rejected (`ESESSION_DESIGNATOR`, exit 2) - pick the track with `--track b`. |
 | `--style json\|human\|both` | output format(s); repeatable / comma-list. Default `json`. |
 | `--combine one-file\|per-file` | multi-session: ONE combined file (default) or per-session files. |
 | `--out <dir\|file>` | write here (dir = one file per `suggestedName`; a `.json`/`.md` path = a single file). Omit → stdout. |
@@ -36,7 +37,7 @@ Programmatic callers `require('./tpm-session-export')` for `exportSessions(opts)
 - **Multi (combined, Q4):** JSON = a **bare array** of session envelopes (no wrapper); human = the **full
   per-session render repeated** per session (one `# Session NNNN` header each, not one top header).
   `--combine one-file` (the multi default).
-- **Multi (per-file):** one file per session, `session-<NNNN>.{json,md}`. `--combine per-file`.
+- **Multi (per-file):** one file per session, `session-<NNNN>.{json,md}`; a session with several tracks writes one JSON per track (`session-<NNNN>-b.json` ...) but still ONE merged `.md`. `--combine per-file`.
 - **JSON and/or human:** `--style json` / `human` / `both`. With `both` + per-file, each session yields
   both a `.json` and a `.md`.
 
@@ -98,4 +99,21 @@ tpm session export --sessions-dir /tmp/s --last 2 --style both --combine per-fil
 `--last N` emits newest-first (descending session number); an explicit `--session` selector preserves the
 order you give.
 
-Tests: `session-tooling/tests/session-export.test.js` (auto-discovered by `tests/run-all.js`).
+## Sessions with several tracks (phase 12)
+
+A session folder may hold one record per track (`session-0001.json` = a, `session-0001-b.json` = b, ...). Without `--track`, every
+track is read; the state of each comes from `T.trackState` (a track sealed by someone else's marker still has a JSON record whose
+`meta.closedAt` is `null` and a `.md` that says "open" - the marker wins, and nothing here ever rewrites those files).
+
+- **human** (`review`): ONE merged read per session. A lone track `a` prints exactly as before (byte-identical). Several tracks print
+  `# Session NNNN · K parallel tracks`, a table (`track | state | owner | opened | last write`), each track's full section (ids shown
+  as `#1a.2` - track a gains its letter only in a multi-track session; the banner says `sealed by marker (abandoned)` where the marker
+  says so), then `## Open punchlist, all tracks (N)`. A folder holding only track `b` prints `1 track (track b)`. An unreadable track
+  gets a table row `unreadable (<reason>)` and a 3-line block; the other tracks still print.
+- **json**: one on-disk envelope per track; one record in total is a bare envelope, several are a bare array (a..z). One stderr line
+  per marker-sealed track: `note: track b of 0001 is sealed by a marker (abandoned); its JSON record still says meta.closedAt = null - the marker is authoritative`.
+  An unreadable track is skipped with a stderr note (exit stays 0).
+- **file names** (`--out`): only the **JSON** is per track. JSON: `session-0001.json` (track a), `session-0001-b.json`, `session-0001-c.json`, ... - the track letter is in the name, so `--combine per-file` no longer overwrites. Human: ONE merged `session-0001.md` for the whole session (all tracks, the table, the combined open punchlist) - there is **no** `session-0001-b.md` per track unless you narrow with `--track b` (then the merged unit holds only that track and is named `session-0001-b.md`). Verified on a three-track scratch store: `--style both --combine per-file` wrote `session-0001.json`, `session-0001-b.json`, `session-0001-c.json`, `session-0001.md` (4 files); `--style json --combine per-file` wrote the three JSON files; `--track b --style both --out <dir>` wrote `session-0001-b.json` + `session-0001-b.md`.
+- A lone track `a` sealed by a marker: stdout unchanged, stderr `note: track a of session 0001 was SEALED AS ABANDONED ...`.
+
+Tests: `session-tooling/tests/session-export.test.js`, `session-collate.test.js` (auto-discovered by `tests/run-all.js`).

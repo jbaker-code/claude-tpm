@@ -194,6 +194,38 @@ The five suites are `session`, `task`, `workflow`, `hooks`, and `plugin`. On top
 
 > **A doc-map note:** there are two tool docs in the tree. `tools/README.md` is the self-titled canonical tool ledger - the exhaustive index of every tool that ships. `tools/tpm.md` is the narrower reference for the `tpm` dispatcher itself (the two-level model, the suite/verb tables, exit codes). Both cover the five suites (`session` / `task` / `workflow` / `hooks` / `plugin`) plus the `install` / `uninstall` / `doctor` aliases; **if they ever disagree, `tools/README.md` wins.**
 
+### Concurrent writers: the store lock
+
+Several Claude sessions can run `tpm` against one project at once, so a store that is read, modified and written
+back is serialised. Every mutating `tpm task` verb (`add edit import add-subtask check start finish drop remove
+reopen label unlabel remove --hard reindex`) holds a directory lock, `<tasksDir>/.lock`, taken by an atomic rename
+of a prepared directory (`tools/lib/lock.js`), for its whole read-modify-write; the three index views and each
+body are also written by temp-file rename, so a reader never sees a torn file. Read verbs (`list show labels
+history export search doctor`) take no lock. A waiting verb prints one line after 2 s and gives up after ~45 s
+(`TPM_LOCK_WAIT_MS`); a lock whose holder died, or that is older than 30 s (`TPM_LOCK_STALE_MS`), is broken loudly
+and kept as `.lock.broken.*` for `tpm task doctor`. The lock directory contains its own `.gitignore` (`*`), so it
+is never committed. Each write stamps `lastWriter: {version, at}` in `tasks-index.json`, which the doctor uses to
+flag a store last written by an older tpm. `tpm task migrate` takes no store lock because `--out-dir` is a staging
+directory; pointing it at a live store with `--force` is unsupported. Details and real output:
+`tools/task/tpm-task.md`; the rule for tool authors: `claude-context/methodology/tool-conventions.md` section 7.
+
+### Session tracks: several Claude instances, one session folder
+
+A `session-NNNN/` folder holds one record per **track**: `session-NNNN.json` is track a (the pre-tracks name), `-b` ... `-z` are the others, each with a
+derived `.md`, plus an optional `.sealed` marker. Ownership is additive `meta` (`track`, `claudeSessionId`, `claudePid`, `claudePidStartedAt`,
+`hostname`, `lastWriter {version, at}`); there is no `schemaVersion` bump. "Which track is mine" is answered by `$CLAUDE_CODE_SESSION_ID`. The session
+number is claimed by a non-recursive `mkdir`, and a track record by a `link` from a prepared temp (never an overwrite), so a lost race is detected and
+re-gated rather than joined. `tpm session current --open` is the gate: resume your track, or refuse (exit 3, nothing written) when another session's
+track is unsealed, after which a person picks `--adopt` / `--parallel` / `--next` / `--seal-and-new`. A track is sealed by its own `meta.closedAt` or by
+a `.sealed` marker written by another instance (abandoned seal, exit 4 until confirmed). Canonical JSON, the derived `.md`, claims, markers and the hint
+are all written atomically. Item ids are minted per track (track a `1.4`, track b `1b.4`; both forms are accepted) and slugs are unique per record only, never globally;
+`punchlist close|reopen|drop` on another track's item is refused (`ECROSS_TRACK`). Reads collate the tracks through one place (`tools/session/lib/session-collate.js`): `export --style human`
+is one merged document per session while JSON is one record per track (`--combine per-file` names the JSON files with the letter, the human file is a single `session-NNNN.md`),
+and `boot-read` derives the pickup (a track is left out only if a later session opened strictly after it settled; a live track never settles; a tie shows the track) with no stored state.
+`boot-read` exits 0 on every data problem; `--track` with no value is a usage error (exit 2). `doctor` folds a name/`meta.track` mismatch and its claim collision into one finding;
+`migrate` carries the source's latest real timestamp into `handoff.updatedAt` unless `--now` is given. Reference: `tools/session/tpm-session-current.md`, `tools/session/tpm-session-ops.md`,
+`claude-context/methodology/session-notes-format.md`; user-facing explanation: `user-guide.md` section 5b.
+
 ### Self-locating
 
 Every router finds its own scripts relative to `__dirname`, so a tool never needs an environment variable to

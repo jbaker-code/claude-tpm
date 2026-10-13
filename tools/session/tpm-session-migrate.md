@@ -37,7 +37,7 @@ tpm session migrate --in <old-session-dir> --out-dir <dir> \
 | `--emit-md` | | also write the derived human-readable `session-<NNNN>.md` (via the converter). **Default: on** (kept for explicitness / back-compat). |
 | `--no-emit-md` | | opt OUT of the derived `.md` — write only the canonical `.json`. |
 | `--force` | | overwrite an existing output file (otherwise refuse if it exists). |
-| `--now <iso>` | | reference stamp for `handoff.updatedAt` (default: now, local offset). Injectable so goldens are byte-stable. |
+| `--now <iso>` | | explicit stamp for `handoff.updatedAt`. When given it ALWAYS wins (goldens pin it so output is byte-stable). When omitted, `handoff.updatedAt` is the source's own latest real timestamp (see the field table), falling back to now only if the source holds none. |
 | `--help` | | show usage. |
 
 No flag has a default path (tool-conventions "no hardcoded paths / no silent defaults for required inputs").
@@ -92,7 +92,7 @@ A silent partial migration of a hand-written note is worse than a clear "convert
 | `handoff.next` | `**Next action:**` (or `**Next:**`) line | |
 | `handoff.in_flight` | `**In flight:**` line, split on `;` | |
 | `handoff.must_not_redo` | `## MUST NOT redo` bullets | |
-| `handoff.updatedAt` | `--now` / `nowIsoTz()` | a real *current* stamp marking when the record was materialized (not a fabricated historical time). If the source has no usable Where/Next, `handoff` is `null` (valid). |
+| `handoff.updatedAt` | `--now` if given; else the LATEST real ISO-with-offset stamp in the source (log timestamps, punchlist `createdAt`/event times, sidecar `openedAt`/`closedAt`); else now (local offset) | the record's real last-write time, so a migrated legacy session does not look freshly written. Migrate prints a `note:` saying which was used. Verified on `tests/fixtures/legacy/session-0021`: no `--now` -> `2026-09-19T21:44:19-07:00`; `--now 2026-09-19T22:00:00-07:00` -> that value. **Sessions migrated before this change keep the now-stamp they were given** (nothing rewrites them). The fall-back to now when the source holds no stamp at all is unexercised (no such fixture). If the source has no usable Where/Next, `handoff` is `null` (valid). |
 | `log[]` | `## Decisions` (`type:"decision"`, `what`/`why` split on the first ` — `) + `## Log` (`type:"log"`, `status`/`text`) | merged, **sorted by timestamp**, `seq` assigned `1..n` (robust to the file's physical order). |
 | `punchlist[]` | `## Open` / `## Done` items `#<id> · <text> [<slug>, <ts>] (closed <ts>)` | `slug` (lineage key) **preserved verbatim**; `id` kept as written; `events` = `add` (+ `close` for done items with a close-ts). |
 
@@ -151,3 +151,11 @@ clean / sidecar / refusal fixtures); output always goes to `os.tmpdir()` — the
 never read or written. Includes the **golden old→new pair** (real 0021 → frozen
 `session-0021.expected.json`, byte-exact), faithful-mapping assertions, the Q-B refusals, the Q-C
 no-synthesis checks, and the safety rails. The golden is mutation-proven (a parser regression turns it red).
+
+## Multi-track folders
+
+A folder of TRACK records (`session-NNNN.json`, `session-NNNN-b.json` ..., `.sealed` markers) is the current format: given as
+`--in` it is refused with "current-format session folder ... nothing to migrate" and nothing is touched. Migrating INTO a session
+folder that already holds sibling tracks (b..z or a seal marker) is refused explicitly, even with `--force` or `--dry-run`: a
+migrated session is an unowned track a and would sit beside live or sealed tracks. Choose a different `--out-dir`.
+Legacy marked 3-file folders migrate exactly as before.

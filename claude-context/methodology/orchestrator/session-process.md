@@ -17,19 +17,24 @@ around it.
 
 `tpm-session open` (composed by `tpm session compose --mode open` from `tools/session/templates/open.md`):
 1. Allocates or confirms the current session via `tpm session current --open`
-   (idempotent — reuses the current session's number if one is already open this session; it manages the
-   `.current-session.json` pointer, not the folder, which `ops open` creates on first write).
+   (idempotent — it finds YOUR track by Claude session id and resumes it; otherwise it creates the session
+   folder AND your track's record. If another Claude session still has an unsealed track it REFUSES with
+   exit 3 and writes nothing. `.current-session.json` is only a non-authoritative hint kept true).
 2. Runs `tpm session boot-read` to pull the PRIOR session's state into context. This is
    a **tool call, not the model choosing to open a file** — its stdout is the pickup payload. Because it
-   runs after step 1's `--open`, it excludes the just-opened current session and iterates the priors
-   descending, emitting the highest readable record:
+   runs after step 1's `--open`, it excludes the session YOUR instance owns and emits what the prior session(s) left:
    - **Readable prior session:** the prior handoff slice verbatim + its open punchlist headlines + the
      canonical `session-NNNN.json` and derived `session-NNNN.md` file locations + the "log reads
      newest-first" reminder.
+   - **A prior session that ran several parallel tracks** (one per Claude instance): one block per track —
+     its state (sealed by its owner / sealed as abandoned by another instance / still live), its handoff
+     verbatim, its open items, its file locations — then one combined open-items list. A track a later session already
+     picked up (it opened strictly after the track settled) is left out and named in the header; a live or abandoned
+     track is labelled, never hidden. Keep the tracks apart; reconcile them before acting.
    - **Unparseable / unknown-schema prior session:** SKIPPED — boot-read degrades to one clean line and
      keeps looking; the `lib/` model's migrate step refuses an unknown-newer schema rather than crashing.
    - **No readable prior session:** a clean "no prior session found — this looks like the first session" line.
-   `boot-read` **always exits 0** — it can never crash boot; it self-resolves the sessions dir via config.
+   `boot-read` exits 0 on every data problem (it never crashes boot; the sole non-zero exit is a malformed `--track` with no value, exit 2); it self-resolves the sessions dir via config.
 
 ## During a session
 
@@ -69,17 +74,17 @@ told), so they are ritual, never a mechanical requirement that would false-fail 
 
 ## Session numbering + first save of a session
 
-1. `save` resolves the CURRENT session (the one `open` established, via the pointer at
-   `<sessionsDir>/.current-session.json`) — it does **NOT** create a new folder on every save. Repeated
+1. `save` resolves the CURRENT session (the one `open` established; your track is found by Claude session id,
+   not by `<sessionsDir>/.current-session.json`, which is only a kept-true hint) — it does **NOT** create a new folder on every save. Repeated
    saves within one session rewrite the SAME `session-NNNN/session-NNNN.json` wholesale (and re-render
    the `.md`).
-2. On the **first write of a session**, `ops open` creates the folder + the canonical record (empty
-   sections) so the derived `.md` reveals where memory lives.
+2. `current --open` itself creates the folder + the canonical record (empty sections, owner stamped in `meta`) so
+   the derived `.md` reveals where memory lives; the manual `ops open` never overwrites an existing record.
 3. A genuinely NEW session (no session currently open — a fresh `tpm-session open`, or the prior
    session's pointer was closed by `current --seal`) allocates the NEXT number: highest existing
-   `session-NNNN` + 1, zero-padded to **four** digits, allocated automatically by the current-session pointer (`tpm session current`).
+   `session-NNNN` + 1, zero-padded to **four** digits, allocated automatically by `tpm session current --open`.
 4. A prior session's record is **never** overwritten by a later one — `close`'s seal step
-   (`ops close`) stamps `meta.closedAt`, and `current --seal` marks the pointer closed.
+   (`ops close`) stamps `meta.closedAt` on YOUR track only, and `current --seal` closes the hint only when no track of the session is still unsealed.
 
 **Numbering convention:** folders are `session-NNNN`, **four-digit** zero-padded, sequential, highest
 number = most recent session. What the tool owns is WHO allocates the number and WHEN (a genuinely new

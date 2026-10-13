@@ -36,6 +36,24 @@ export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADMIN_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# --- attribution: tell the child which tpm session LAUNCHED it (informational only) ---
+# TPM_SESSION_ID is set in the child env to the launching session (stored form, e.g. session-0012b),
+# resolved with the SHARED resolver (tools/lib/attribution.js). Skipped when the caller already exported one;
+# nothing is set (and nothing printed) when no session resolves. Never fails the launch.
+# KNOWN LIMITATION (#1175 coupling): TPM_SESSION_ID names a session NUMBER, not a store. It is correct only
+# while the child writes the PARENT's store (true today via the #1175 TPM_PROJECT_ROOT leak); once #1175 is
+# fixed, a child writing its OWN store would mis-stamp. Do not "fix" that here.
+# What the child sees: `--headless` exports TPM_SESSION_ID before `claude -p` runs; `--interactive` puts it inline in
+# the launched command (`TPM_SESSION_ID='session-0012b' claude --remote-control ...`), and so does `--print-cmd`, so you can
+# check it without launching. A caller-exported TPM_SESSION_ID is kept verbatim. The child's tpm tools then stamp it as
+# `sessionVia: "env"` (see tools/task/tpm-task.md "Session attribution"). Only `--print-cmd` has been checked end to end;
+# a real headless / interactive child run has not.
+CHILD_SESSION_ATTR=""
+if [ -z "${TPM_SESSION_ID:-}" ]; then
+  CHILD_SESSION_ATTR="$(node -e 'try{const a=require(process.argv[1]);const r=a.toEventFields(a.resolveAttribution());process.stdout.write(r.session||"")}catch(e){}' "$ADMIN_ROOT/tools/lib/attribution.js" 2>/dev/null || true)"
+  case "$CHILD_SESSION_ATTR" in session-[0-9]*) export TPM_SESSION_ID="$CHILD_SESSION_ATTR" ;; *) CHILD_SESSION_ATTR="" ;; esac
+fi
+
 # --- args ---
 CHILD_DIR="${1:-}"; shift || true
 MODE=""; PROMPT=""
@@ -184,7 +202,7 @@ case "$MODE" in
     # CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 is exported at the top of this script
     # (covers this screen too); re-stated inline here so the transcript-saving fix
     # is visible at the exact launch point even if a login shell reset the env.
-    INNER="cd \"$CHILD_DIR\" && CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude --remote-control \"$SESSION_NAME\" --name \"$SESSION_NAME\" --add-dir \"$SESS_DIR\"; echo \"exit=\$? at \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > \"$SENTINEL\""
+    INNER="cd \"$CHILD_DIR\" && CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 ${TPM_SESSION_ID:+TPM_SESSION_ID=\"$TPM_SESSION_ID\" }claude --remote-control \"$SESSION_NAME\" --name \"$SESSION_NAME\" --add-dir \"$SESS_DIR\"; echo \"exit=\$? at \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > \"$SENTINEL\""
     screen -dmS "$SESSION_NAME" bash -lc "$INNER"
     sleep 1
     CHILD_PID="$(pgrep -f "remote-control $SESSION_NAME" | head -1 || true)"
@@ -213,6 +231,6 @@ case "$MODE" in
     ;;
   print-cmd)
     echo "=== interactive remote-control command (run yourself, or --interactive to launch) ==="
-    echo "cd '$CHILD_DIR' && claude --remote-control '$SESSION_NAME' --name '$SESSION_NAME' --session-id '$CHILD_UUID' --add-dir '$SESS_DIR'"
+    echo "cd '$CHILD_DIR' && ${TPM_SESSION_ID:+TPM_SESSION_ID='$TPM_SESSION_ID' }claude --remote-control '$SESSION_NAME' --name '$SESSION_NAME' --session-id '$CHILD_UUID' --add-dir '$SESS_DIR'"
     ;;
 esac

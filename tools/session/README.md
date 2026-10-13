@@ -20,7 +20,7 @@ derived human render are described under [The JSON envelope + human render](#the
 below. The format-authority specs (`json-format-spec.md` / `export-spec.md`) were not promoted out of the
 sandbox and are not part of this tree; the per-tool `.md` references below are the promoted reference.
 
-Per-tool references: [`tpm-session-ops.md`](tpm-session-ops.md) · [`tpm-session-export.md`](tpm-session-export.md) · [`tpm-session-migrate.md`](tpm-session-migrate.md) · [`tpm-session-doctor.md`](tpm-session-doctor.md) · [`tpm-session-config.md`](tpm-session-config.md) · [`tpm-session-current.md`](tpm-session-current.md) · [`tpm-session-boot-read.md`](tpm-session-boot-read.md). (`tpm-session-router.js` and the suite-local `tpm-session-paths.js` helper carry no `.md`.)
+Per-tool references: [`tpm-session-ops.md`](tpm-session-ops.md) · [`tpm-session-export.md`](tpm-session-export.md) · [`tpm-session-migrate.md`](tpm-session-migrate.md) · [`tpm-session-doctor.md`](tpm-session-doctor.md) · [`tpm-session-config.md`](tpm-session-config.md) · [`tpm-session-current.md`](tpm-session-current.md) · [`tpm-session-boot-read.md`](tpm-session-boot-read.md). Tracks / the open gate / abandoned seals: [`tpm-session-current.md`](tpm-session-current.md) and [`tpm-session-ops.md`](tpm-session-ops.md) ("Tracks"). (`tpm-session-router.js` and the suite-local `tpm-session-paths.js` helper carry no `.md`.)
 
 ---
 
@@ -45,9 +45,12 @@ tools (node-invokable)        tpm-session-ops.js      (ops + #1115 import; regen
                               tpm-session-doctor.js   (#1119 READ-ONLY validate + hash-drift + detect/suggest-migrate)
                               tpm-session-config.js   (resolves the `session` config section over defaults; the config-gate + sessionsDir the skill reads)
                               tpm-session-current.js  (reads/mutates the current-session pointer .current-session.json)
-                              tpm-session-boot-read.js (JSON-first boot pickup: prior handoff + open punchlist + file locations; always exits 0)
+                              tpm-session-boot-read.js (JSON-first boot pickup: prior handoff + open punchlist + file locations; exits 0 on every data problem, `--track` with no value exits 2)
                               tpm-session-router.js   (the `tpm session` sub-router; forwards each verb to the tool above)
                               tpm-session-paths.js    (suite-local findRoot helper; imported by config, not a routed verb)
+  lib/session-ids.js        the one item-id grammar (123.4 == 123a.4; display 123a.4 only when multi-track)
+  lib/session-collate.js    the merged, track-attributed read of one session (export/review now; boot-read/doctor later)
+  lib/session-lock.js       the per-session write lock (<sessionsDir>/session-NNNN/.lock) behind ops' mutate() seam
 ```
 
 Only three things are `kind`-specific: the **payload schema** (`session-schema.js`), the **editable-field
@@ -93,19 +96,22 @@ tools/session/
   tpm-session-doctor.js / .md    #1119 READ-ONLY doctor: validate + hash-drift + detect/suggest-migrate
   tpm-session-config.js / .md    resolves the `session` config section; the config-gate + sessionsDir the skill reads
   tpm-session-current.js / .md   reads/mutates the current-session pointer (.current-session.json)
-  tpm-session-boot-read.js / .md JSON-first boot pickup: prior handoff + open punchlist + file locations; always exits 0
+  tpm-session-boot-read.js / .md JSON-first boot pickup: prior handoff + open punchlist + file locations; exits 0 on every data problem, `--track` with no value exits 2
   tpm-session-router.js          the `tpm session` sub-router; forwards each verb to the tool beside it (no .md)
   tpm-session-paths.js           suite-local findRoot helper; imported by config, not a routed verb (no .md)
   lib/                           kind:"session" modules ONLY (the base lib is the sibling tools/lib/; see note below)
     session-schema.js            SESSION_KIND · EDITABLE_TABLE · validatePayload (registers the kind)
     session-model.js             load/save · mechanical ops · import primitives; require's the base lib via ../../lib
     session-converter.js         render(record,{now}) -> human .md (pure); stamps the (generated from:) banner hash
+    session-tracks.js            the tracks store: track naming (a = session-NNNN.json, b..z = session-NNNN-b.json), trackState()
+                                 (sealed = own meta.closedAt OR a .sealed marker), scans, ownership, claims, seal/unseal, the hint
   tests/
     run-all.js                   forks one process per *.test.js; exits nonzero on any failure
-    *.test.js                    27 suites (unit + e2e + fault + version-tolerance + dogfood + migrate + hash +
-                                 doctor + config/current/boot-read + the P02–P05 cross-cutting suites:
-                                 number-decouple-regression, migrate-openedat-refuse, migration-dogfood-e2e,
-                                 doctor-nested-matrix)
+    *.test.js                    65 suites (unit + e2e + fault + version-tolerance + dogfood + migrate + hash +
+                                 doctor + config/current/boot-read + the cross-cutting suites + the lock/identity
+                                 suites + the tracks-store suites; the last three added are tracks-forced-order,
+                                 tracks-lifecycle, session-md-atomic: see tools/README.md; phase 12 added session-ids, session-collate,
+                                 session-ops-xtrack, session-lock-wrap, session-lock-forced; phase 15 added session-three-track-e2e, session-verbs-harden)
     golden/                      session-0021.fixture.json + .expected.md (byte-exact render golden)
     fixtures/legacy/             #1114 old-format inputs: copied real 0020/0021 + clean/sidecar/refusal
                                  fixtures + session-0021.expected.json (byte-exact old->new golden)
@@ -141,15 +147,25 @@ Zero dependencies; Node built-ins only. From the repo root:
 node tools/session/tests/run-all.js
 ```
 
-Real output (2026-09-20):
+`run-all.js` auto-discovers every `tests/*.test.js` (65 today: `ls tools/session/tests/*.test.js | wc -l`) and forks a process
+per suite. On a constrained machine run the files one at a time, e.g. `node tools/session/tests/tracks-lifecycle.test.js`.
+Tests that play several Claude instances set `CLAUDE_CODE_SESSION_ID` / `CLAUDE_PID` per child process; when you run a CLI
+by hand from inside a Claude session, strip or override them (`env -i PATH="$PATH" HOME="$HOME" CLAUDE_CODE_SESSION_ID=… node tools/tpm.js session …`)
+or you will meet "belongs to another Claude session".
 
-```
-──────────────────────────────
-27 suites run, 0 failed
-```
+---
 
-Exit code `0`. `run-all.js` auto-discovers every `tests/*.test.js` and forks a process per suite, so each
-suite is also runnable standalone, e.g. `node tools/session/tests/session-ops.test.js`.
+## Tracks: more than one Claude instance in a session folder
+
+A `session-NNNN/` folder holds one **track** per Claude instance: `session-NNNN.json` (+ `.md`) is track a, `session-NNNN-b.json` … `-z` are the
+others, and an optional `session-NNNN[-x].sealed` marker means "sealed by someone else". `tpm session current --open` is the **open gate**: it
+resumes your own track, refuses (exit 3, nothing written) when another Claude session's track is unsealed, and otherwise creates the session. After a refusal the
+person chooses one of `--adopt <track>`, `--parallel`, `--next`, `--seal-and-new` (see [`tpm-session-current.md`](tpm-session-current.md) for every
+flag, state, exit code and message, all run against the real tool). Ownership lives in additive `meta` keys (`track`, `claudeSessionId`, `claudePid`,
+`claudePidStartedAt`, `hostname`, `lastWriter`); there is **no `schemaVersion` bump** (still `1.0.0`). The on-disk contract is
+`claude-context/methodology/session-notes-format.md`.
+
+Exit codes across the session CLI: `0` ok · `1` error or a refused choice (JSON `refused:true`, `code`) · `3` open refused (foreign / ambiguous) · `4` abandoned seal needs confirmation.
 
 ---
 
@@ -172,7 +188,8 @@ tpm session <verb> --sessions-dir <dir> --session <NNNN> [flags]
 | `save` | re-persist the current session (re-stamp `handoff.updatedAt`, regenerate the `.md`). |
 | `note` | append ONE log entry: `--log --status NOTE --text "…"` or `--decision --what "…" --why "…"`. Append-only, monotonic `seq`. |
 | `punchlist` | `--action add\|close\|reopen\|drop\|carry-in`. `add`: `--text "…" [--slug s]`. |
-| `close` | **close-guard (#1115):** refuses unless a handoff AND at least one punchlist item are present, naming what is missing; otherwise stamps `meta.closedAt`. |
+| `close` | **close-guard (#1115):** refuses unless a handoff AND at least one punchlist item are present, naming what is missing; otherwise stamps `meta.closedAt`. Seals only YOUR track. `close --track <other> --even-if-running` (alias `--confirm`) is the abandoned seal (exit 4 without the flag). |
+| `unseal` | `--session NNNN --track x`: undo an abandoned seal. |
 
 **Import (`#1115`)** — honors the locked editable table (mechanical fields ignored; state never set by import):
 

@@ -68,8 +68,13 @@ test('bare invocation is state-aware: not-opened -> open; open pointer -> save',
   fs.writeFileSync(path.join(sd, '.current-session.json'), '{}'); // pointer name varies — use the real tool below
   const cur = require('../tpm-session-current');
   fs.rmSync(path.join(sd, '.current-session.json'), { force: true });
-  cur.openSession({ sessionsDir: sd });
+  const opened = cur.openSession({ sessionsDir: sd });
   assert.strictEqual(run('', null, { root }).mode, 'save');
+  // Tracks store: `--seal` no longer stamps a blind "closed" — the hint closes only when no track is
+  // unsealed, so the lone record is CLOSED first (what `close` does), then `--seal`.
+  const model = require('../lib/session-model');
+  const rec = model.loadSession(opened.recordPath);
+  model.saveSession(model.closeSession(rec), { jsonPath: opened.recordPath });
   cur.sealSession({ sessionsDir: sd });
   assert.strictEqual(run('', null, { root }).mode, 'open');
 });
@@ -226,12 +231,16 @@ test('pickup (real boot-read): compose BEFORE vs AFTER `current --open` yields t
   let rec = model.openSession({ number: '0001', sessionId: 'sid', tpmVersion: '0.2.0' });
   rec = model.importHandoff(rec, { where: 'WHERE-MARK', next: 'NEXT-MARK' });
   rec = model.addPunchlist(rec, { text: 'open item', slug: 'itemAA' });
+  rec = model.closeSession(rec);   // a real PRIOR session is sealed (an unsealed null-owner record would be resumed by `--open`)
   const folder = path.join(sd, 'session-0001'); fs.mkdirSync(folder, { recursive: true });
   model.saveSession(rec, { jsonPath: path.join(folder, 'session-0001.json'), mdPath: path.join(folder, 'session-0001.md'),
     render: (r) => render(r, { now: '2026-09-21T10:00:00-07:00' }) });
-  const mk = () => c.compose('open', { config: cfg(), projectRoot: root, sessionsDir: sd, env: {} }).text;
+  // The caller is a REAL Claude instance (it has a session id). A caller with NO readable id owns nothing, so since
+  // phase 13 (reader honesty E1) the session it opens is not excluded as "yours" - see session-boot-multi.test.js.
+  const SID = 'cccccccc-3333-4333-8333-cccccccccccc';
+  const mk = () => c.compose('open', { config: cfg(), projectRoot: root, sessionsDir: sd, env: { CLAUDE_CODE_SESSION_ID: SID } }).text;
   const before = mk();
-  require('../tpm-session-current').openSession({ sessionsDir: sd });
+  require('../tpm-session-current').openSession({ sessionsDir: sd, identity: { claudeSessionId: SID, claudePid: null, claudePidStartedAt: null, hostname: null } });
   const after = mk();
   assert.ok(before.includes('WHERE-MARK') && before.includes('NEXT-MARK'));
   const strip = (t) => t.replace(/session-0002[^\n]*/g, '');

@@ -36,8 +36,13 @@
  *
  * Zero third-party deps; Node built-ins only.
  *
+ * TRACKS (multi-session support) ── a session folder holds one record per track (`session-NNNN.json` = a, `-b`..`-z`), each
+ *  drift-checked against ITS OWN `.md`; sealed-ness is read from trackState only. Report-only trouble checks: stale / owner-gone
+ *  unsealed tracks (with the abandoned-seal hint), marker without record, duplicate track claims, file-name vs meta.track,
+ *  `.lock*` and `*.tmp` leftovers. See tpm-session-doctor.md.
+ *
  * USAGE
- *   node tpm-session-doctor.js --sessions-dir <dir> [--json] [--strict]
+ *   node tpm-session-doctor.js --sessions-dir <dir> [--json] [--strict] [--track <t>] [--stale-after <3d>]
  *
  * FLAGS
  *   --sessions-dir <dir>  Optional (resolved from the project root via TPM_PROJECT_ROOT or the walk-up; this
@@ -64,8 +69,16 @@ const { validateEnvelope } = require('../lib/validate');
 const { validatePayload } = require('./lib/session-schema');
 const { hashRecord } = require('../lib/hash');
 const { detectShape, MigrateError } = require('./tpm-session-migrate');
+const T = require('./lib/session-tracks');
+const ids = require('./lib/session-ids');
+const collate = require('./lib/session-collate');
+const lockLib = require('../lib/lock');
 
-const SESSION_JSON_RE = /^session-(\d+)\.json$/;                 // canonical file inside a per-session folder
+// A track record inside a per-session folder: track a `session-NNNN.json`, track b..z `session-NNNN-b.json`.
+const SESSION_JSON_RE = /^session-(\d+)(?:-([b-z]))?\.json$/;
+const SESSION_FOLDER_RE = /^session-(\d+)$/;
+const DEFAULT_STALE_MS = 3 * 24 * 3600 * 1000;                   // an unsealed track with no write for this long is "stale"
+const TMP_LEFTOVER_MS = 60 * 1000;                               // a *.tmp younger than this may be a write in flight
 // The `(generated from: <12hex>)` token on banner line 2 (wording per Q-D.2, Jason 2026-09-20;
 // was ` · gen-from <12hex>`). The literal `(generated from: ` prefix + a 12-hex run cannot collide
 // with the abbreviated id (which contains `…` and dashes). The closing `)` is a hard boundary, so
@@ -87,8 +100,11 @@ function checkSession(dir, name) {
   const jsonPath = path.join(dir, name);
   const m = SESSION_JSON_RE.exec(name);
   const fileNumber = m ? m[1] : null;
+  const fileTrack = m ? (m[2] || 'a') : null;
+  const mdName = name.replace(/\.json$/, '.md');                    // THIS record's own derived file (track b -> session-NNNN-b.md)
   const result = {
     file: name,
+    track: fileTrack,
     number: null,
     validate: { status: 'OK' },
     drift: { status: 'NONE' },
@@ -123,7 +139,7 @@ function checkSession(dir, name) {
   }
 
   // drift + number-form: use raw (readable), independent of the validate verdict
-  result.drift = checkDrift(dir, fileNumber, raw);
+  result.drift = checkDrift(dir, fileNumber, raw, mdName);
   result.numberForm = checkNumberForm(raw, fileNumber);
   return result;
 }
@@ -133,9 +149,9 @@ function checkSession(dir, name) {
  * READ-ONLY: recompute hashRecord(raw) and compare to the `.md` banner's `(generated from: …)`
  * token. Never re-renders, never rewrites.
  */
-function checkDrift(dir, fileNumber, raw) {
+function checkDrift(dir, fileNumber, raw, mdName) {
   if (fileNumber == null || raw == null) return { status: 'NONE' };
-  const mdPath = path.join(dir, `session-${fileNumber}.md`);
+  const mdPath = path.join(dir, mdName || `session-${fileNumber}.md`);
   if (!fs.existsSync(mdPath)) return { status: 'NONE' }; // no derived file → nothing to drift-check
   const md = fs.readFileSync(mdPath, 'utf8');
   const currentHash = hashRecord(raw);
@@ -166,7 +182,7 @@ function checkNumberForm(raw, fileNumber) {
 
 function dirHasCanonicalJson(dirPath) {
   try {
-    return fs.readdirSync(dirPath).some((n) => SESSION_JSON_RE.test(n));
+    return fs.readdirSync(dirPath).some((n) => SESSION_JSON_RE.test(n) || /^session-\d+(?:-[b-z])?\.sealed$/.test(n));
   } catch (_e) {
     return false;
   }
@@ -212,13 +228,185 @@ function checkOldFormat(dirPath, subName) {
   };
 }
 
+// ── track-aware checks (report-only) ──────────────────────────────────────────
+
+const short8 = (id) => (id ? String(id).slice(0, 8) : 'unowned');
+const issue = (code, message, severity) => ({ code, severity: severity || 'advisory', message });
+
+function fmtAge(ms) {
+  const h = ms / 3600000;
+  return h >= 48 ? `${Math.floor(h / 24)}d` : `${Math.max(0, Math.floor(h))}h`;
+}
+
+/** The actionable way out for an unsealed track nobody is writing: the abandoned seal (needs --confirm; deletes nothing). */
+function sealHint(number, track) {
+  return `to retire it: tpm session close --session ${number} --track ${track} --confirm --reason "abandoned" (an abandoned seal: nothing is deleted or rewritten; its last save stays readable)`;
+}
+
+function stateWord(ts) {
+  if (!ts) return 'unknown';
+  if (ts.state === 'unreadable' && ts.sealedBy === null) return 'unreadable';
+  if (ts.sealedBy === 'marker') return 'sealed-marker';
+  if (ts.state === 'sealed') return 'sealed-self';
+  return 'live';
+}
+
+/** The text after "OK ·" in a multi-track row. Sealed-ness comes from trackState only. */
+function stateText(ts) {
+  const w = stateWord(ts);
+  const owner = ts.owner && ts.owner.claudeSessionId ? ` · owner ${short8(ts.owner.claudeSessionId)}` : '';
+  if (w === 'sealed-self') return `SEALED by owner ${ts.sealedAt || ''}`.trim() + owner;
+  if (w === 'sealed-marker') return `SEALED by marker (${collate.stateWordOf(ts).replace(/^sealed by marker \(|\)$/g, '')} ${ts.sealedAt || ''})`.replace(/ \)$/, ')') + owner;
+  if (w === 'unreadable') return 'unreadable';
+  return 'live' + owner;
+}
+
+/**
+ * auditTrack(ts, ctx) -> [issue]   the per-track trouble checks. Reads trackState only (never closedAt, never the .md).
+ */
+function auditTrack(ts, ctx) {
+  const out = [];
+  const stem = `session-${ts.number}${ts.track === 'a' ? '' : `-${ts.track}`}`;
+  for (const w of ts.warnings || []) {
+    if (w === 'marker-without-record') out.push(issue('MARKER-WITHOUT-RECORD', `seal marker ${stem}.sealed has no matching record (${stem}.json is missing); the track reads as sealed but its content is gone`));
+    else if (w === 'marker-unreadable') out.push(issue('MARKER-UNREADABLE', `seal marker ${stem}.sealed cannot be parsed; the track still reads as sealed (a marker that exists wins)`));
+    else if (w === 'track-mismatch') out.push(issue('TRACK-MISMATCH', `${stem}.json is named for track ${ts.track} but its meta.track says ${JSON.stringify(ts.record && ts.record.meta && ts.record.meta.track)}`));
+    else if (w === 'md-missing') out.push(issue('MD-MISSING', `${stem}.md (the derived file) is missing; the next save re-renders it`, 'info'));
+  }
+  if (ts.record && ts.track !== 'a' && ts.record.meta && ts.record.meta.track === undefined) {
+    out.push(issue('TRACK-MISMATCH', `${stem}.json is named for track ${ts.track} but its meta.track is absent`));
+  }
+  if (ts.sealedBy === 'marker' && ts.record) {
+    out.push(issue('MARKER-STALE-RECORD', 'the record and .md may still read "open" - expected, the marker is authoritative', 'info'));
+  }
+  if (ts.state === 'live' && !ts.superseded) {
+    const hint = sealHint(ts.number, ts.track);
+    const last = Date.parse(ts.lastWriteAt || '');
+    if (Number.isFinite(last) && ctx.nowMs - last > ctx.staleMs) {
+      out.push(issue('STALE', `unsealed track with no write for ${fmtAge(ctx.nowMs - last)} (last ${ts.lastWriteAt}; limit ${fmtAge(ctx.staleMs)}); ${hint}`));
+    }
+    const lv = T.livenessOf(ts.owner, { hostname: ctx.hostname }, { isAlive: ctx.isAlive, startedAt: ctx.startedAt });
+    if (lv.status === 'gone') out.push(issue('OWNER-GONE', `unsealed track whose owner is gone (${lv.line}); ${hint}`));
+  }
+  return out;
+}
+
+function auditLocks(subPath, sub, nowMs) {
+  const out = [];
+  let ins;
+  try {
+    ins = lockLib.inspect(path.join(subPath, '.lock'), { now: () => nowMs });
+  } catch (_e) {
+    return out;
+  }
+  if (ins.state === 'stale') out.push(issue('LOCK-STALE', `${sub}/.lock is stale (${ins.stale && ins.stale.reason ? ins.stale.reason : 'old'}); the next writer breaks it, or remove it by hand once no tpm verb is running`));
+  else if (ins.state === 'incomplete') out.push(issue('LOCK-INCOMPLETE', `${sub}/.lock has no readable owner record; it is never auto-broken - remove it by hand once no tpm verb is running`));
+  else if (ins.state === 'held') out.push(issue('LOCK-HELD', `${sub}/.lock is held right now (a tpm verb is writing)`, 'info'));
+  if (ins.state !== 'none' && !ins.gitignore) out.push(issue('LOCK-NO-GITIGNORE', `${sub}/.lock has no .gitignore (it could be committed)`, 'info'));
+  if (ins.leftovers && ins.leftovers.length) out.push(issue('LOCK-LEFTOVER', `${sub}: leftover lock file(s) ${ins.leftovers.join(', ')} (a crashed or broken lock; safe to remove once no tpm verb is running)`));
+  return out;
+}
+
+function auditTmpLeftovers(subPath, sub, nowMs) {
+  const out = [];
+  let names = [];
+  try { names = fs.readdirSync(subPath); } catch (_e) { return out; }
+  const old = [];
+  for (const n of names) {
+    if (!/\.tmp$/.test(n) || n.startsWith('.lock')) continue;
+    try {
+      if (nowMs - fs.statSync(path.join(subPath, n)).mtimeMs > TMP_LEFTOVER_MS) old.push(n);
+    } catch (_e) { /* gone */ }
+  }
+  if (old.length) out.push(issue('LEFTOVER-TMP', `${sub}: leftover temp file(s) ${old.join(', ')} (an interrupted write; safe to remove)`));
+  return out;
+}
+
+/** A name that LOOKS like a mis-named track record is worth a line; `session-notes.md` is a permanent false alarm. */
+const trackLike = (u) => /\.json$|\.sealed/.test(u.file);
+
+/**
+ * inspectFolder(root, sub, number, ctx) -> { rows, notes, found }
+ * One session folder: a row per track record (each paired with ITS OWN .md), folder-level notes.
+ */
+function inspectFolder(root, sub, number, ctx) {
+  const subPath = path.join(root, sub);
+  const lf = T.listFolder(root, number);
+  const multi = ids.sessionIsMulti(lf);
+  const rows = [];
+  const notes = [];
+  const claims = new Map();                                    // claimed track -> [file]
+  for (const t of lf.tracks) {
+    const ts = T.trackState(root, number, t.track);
+    if (!ts) continue;
+    if (ts.state === 'live' && ts.record && ts.record.meta && ts.record.meta.track === undefined
+        && Number(number) < ctx.highest) ts.superseded = true;
+    if (ctx.filter && !ctx.filter(ts)) continue;
+    const jsonName = path.basename(ts.jsonPath);
+    let row;
+    if (t.files.json) {
+      row = checkSession(subPath, jsonName);
+      row.file = path.join(sub, jsonName);
+    } else {
+      const sealedName = path.basename(T.trackPaths(root, number, t.track).sealedPath);
+      row = { file: path.join(sub, sealedName), track: t.track, number: null, validate: { status: 'NO-RECORD' }, drift: { status: 'NONE' }, numberForm: { status: 'OK' } };
+    }
+    row.track = t.track;
+    row.multi = multi;
+    row.state = stateWord(ts);
+    row.stateText = stateText(ts);
+    row.issues = auditTrack(ts, ctx);
+    if (ts.record && ts.record.meta && typeof ts.record.meta.track === 'string') {
+      const k = ts.record.meta.track;
+      if (!claims.has(k)) claims.set(k, []);
+      claims.get(k).push(jsonName);
+    }
+    rows.push(row);
+  }
+  for (const [track, files] of claims) {
+    if (files.length > 1) {
+      const msg = `${files.join(' and ')} both claim track ${track}; each track has exactly one record (keep the real one, move the other out of the folder)`;
+      const mine = rows.filter((r) => files.includes(path.basename(r.file)));
+      // One fault -> one finding: a claim collision is the CONSEQUENCE of a file whose name disagrees with its
+      // meta.track. When any claimant already carries TRACK-MISMATCH, fold the collision into that finding
+      // (no DUPLICATE-TRACK on either row); DUPLICATE-TRACK stays only for a collision with no mismatched claimant.
+      const mismatched = mine.filter((r) => r.issues.some((i) => i.code === 'TRACK-MISMATCH'));
+      if (mismatched.length) {
+        for (const r of mismatched) {
+          const others = files.filter((f) => f !== path.basename(r.file)).join(' and ');
+          for (const i of r.issues) if (i.code === 'TRACK-MISMATCH') i.message += `; it collides with ${others}, which also claims track ${track} (keep the real record, move the other out of the folder)`;
+        }
+      } else {
+        // defensive: unreachable for on-disk data (two files claim one track only when a name disagrees -> TRACK-MISMATCH)
+        for (const r of mine) r.issues.push(issue('DUPLICATE-TRACK', msg));
+      }
+    }
+  }
+  if (!ctx.filter) {
+    const trackA = lf.tracks.find((t) => t.track === 'a' && t.files.json);
+    for (const u of lf.unrecognised) {
+      if (u.why === 'derived file without a record') notes.push({ dir: sub, ...issue('MD-WITHOUT-RECORD', `${u.file}: a derived file with no record beside it`, 'info') });
+      else if (trackLike(u)) {
+        if (/^session-\d+-a\.json$/.test(u.file) && trackA) notes.push({ dir: sub, ...issue('DUPLICATE-TRACK', `${u.file} and ${path.basename(trackA ? T.trackPaths(root, number, 'a').jsonPath : '')} both claim track a (a is the unsuffixed file); move the extra one out of the folder`) });
+        else notes.push({ dir: sub, ...issue('UNRECOGNISED', `${u.file}: ${u.why}; not treated as a track`) });
+      }
+    }
+    for (const x of auditLocks(subPath, sub, ctx.nowMs)) notes.push({ dir: sub, ...x });
+    for (const x of auditTmpLeftovers(subPath, sub, ctx.nowMs)) notes.push({ dir: sub, ...x });
+  }
+  return { rows, notes, found: lf.tracks.length > 0 };
+}
+
 // ── the doctor run ────────────────────────────────────────────────────────────
 
 /**
  * runDoctor(opts) -> report
  *   opts.sessionsDir — REQUIRED. Directory to inspect (READ-ONLY).
  *   opts.strict      — promote advisories to a non-zero exit.
- * Returns { sessionsDir, results, oldFormat, summary, exitCode }. Writes nothing.
+ *   opts.staleMs     — an unsealed track with no write for longer than this is reported (default 3 days).
+ *   opts.track       — narrow to one track (letter or Claude id prefix of the owner).
+ *   opts.now / opts.isAlive / opts.startedAt / opts.hostname — test seams.
+ * Returns { sessionsDir, results, oldFormat, notes, summary, exitCode }. Writes nothing.
  */
 function runDoctor(opts) {
   const options = opts || {};
@@ -234,36 +422,96 @@ function runDoctor(opts) {
   }
 
   // Discovery: NESTED per-session folders are THE canonical layout (json-format-spec §"On-disk naming
-  // + location", Q-F) — each session lives in its OWN dir as `session-<NNNN>/session-<NNNN>.json`
-  // alongside its derived `session-<NNNN>.md`. The former additive FLAT top-level scan was REMOVED at
-  // Q-F (the writer + migrator now emit nested too, so a flat scan can only double-count).
+  // + location", Q-F) — `session-<NNNN>/` holds one record per TRACK (`session-<NNNN>.json` = track a,
+  // `session-<NNNN>-b.json` … = tracks b..z), each with its own derived `.md`. Dot-names (`.lock`, hint)
+  // are never sessions. A subdir WITHOUT any track record falls through to old-format detect + suggest.
   const results = [];
-
-  // Immediate subdirectories. A subdir that holds a canonical `session-<NNNN>.json` is a session:
-  //    validate + drift-check it IN PLACE (the `.md` sibling is right there). Only a subdir WITHOUT
-  //    canonical JSON falls through to old-format detect + suggest (never convert).
   const oldFormat = [];
-  const subdirs = entries.filter((d) => d.isDirectory()).map((d) => d.name).sort();
+  const notes = [];
+  const subdirs = entries.filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name).sort();
+
+  const nowMs = options.now instanceof Date ? options.now.getTime() : (Number.isFinite(options.now) ? options.now : Date.now());
+  let hostname = options.hostname;
+  if (hostname === undefined) { try { hostname = require('os').hostname(); } catch (_e) { hostname = null; } }
+  const ctx = {
+    nowMs,
+    staleMs: Number.isFinite(options.staleMs) && options.staleMs > 0 ? options.staleMs : DEFAULT_STALE_MS,
+    hostname,
+    isAlive: options.isAlive,
+    startedAt: options.startedAt,
+    highest: -1,
+    filter: null,
+  };
+  const canonical = (sub) => {
+    const m = SESSION_FOLDER_RE.exec(sub);
+    return m && sub === `session-${T.padNumber(m[1])}` ? m[1] : null;
+  };
+  for (const sub of subdirs) {
+    const n = canonical(sub);
+    if (n !== null && T.listFolder(sessionsDir, n).tracks.length) ctx.highest = Math.max(ctx.highest, Number(n));
+  }
+  if (options.track !== undefined && options.track !== null && options.track !== '') {
+    const sel = String(options.track);
+    if (!(T.isTrackLetter(sel) || sel.length >= 8)) {
+      throw new T.TrackError('ETRACK_SELECTOR', `--track '${sel}' is not a track: give one letter a-z or at least 8 characters of a Claude session id. Nothing was read.`);
+    }
+    ctx.filter = (ts) => (T.isTrackLetter(sel)
+      ? ts.track === sel
+      : Boolean(ts.owner && ts.owner.claudeSessionId && String(ts.owner.claudeSessionId).toLowerCase().startsWith(sel.toLowerCase())));
+  }
+
   for (const sub of subdirs) {
     const subPath = path.join(sessionsDir, sub);
+    const n = canonical(sub);
+    if (n !== null) {
+      const r = inspectFolder(sessionsDir, sub, n, ctx);
+      if (r.found) {
+        results.push(...r.rows);
+        notes.push(...r.notes);
+        continue;                      // a folder holding track records is current-format, never an old-format candidate
+      }
+      if (!ctx.filter) notes.push(...r.notes);
+    }
+    if (ctx.filter) continue;
     let subEntries;
     try {
       subEntries = fs.readdirSync(subPath);
     } catch (_e) {
       subEntries = [];
     }
-    const nestedJson = subEntries.filter((n) => SESSION_JSON_RE.test(n)).sort();
+    const nestedJson = subEntries.filter((nm) => SESSION_JSON_RE.test(nm)).sort();
     if (nestedJson.length) {
       for (const name of nestedJson) {
         const row = checkSession(subPath, name);
-        row.file = path.join(sub, name); // disambiguate nested rows in the report (e.g. session-0021/session-0021.json)
+        row.file = path.join(sub, name);
+        row.issues = [];
         results.push(row);
       }
-      continue; // a dir with canonical JSON is a migrated session, not an old-format candidate
+      continue;
     }
     const row = checkOldFormat(subPath, sub);
     if (row) oldFormat.push(row);
   }
+  if (ctx.filter && !results.length) {
+    throw new T.TrackError('ENO_TRACK', `no track matches --track '${options.track}' in any session folder.`);
+  }
+
+  // The hint is non-authoritative; say so when it disagrees with the tracks (informational).
+  let hint = null;
+  try {
+    const cur = require('./tpm-session-current').resolveCurrentSession({ sessionsDir, identity: { claudeSessionId: null }, mode: 'all' });
+    if (cur.hint && cur.hint.present) {
+      hint = { ok: cur.hint.ok, agreesWithTracks: cur.hint.agreesWithTracks };
+      if (!ctx.filter && (cur.hint.agreesWithTracks === false || !cur.hint.ok)) {
+        notes.push({ dir: '.', ...issue('HINT-DISAGREES', cur.hint.ok ? '.current-session.json disagrees with the tracks (it is non-authoritative and is re-derived by the next session write)' : '.current-session.json is unreadable (it is non-authoritative and is re-derived by the next session write)', 'info') });
+      }
+    }
+  } catch (_e) { /* informational */ }
+
+  const all = [];
+  for (const r of results) for (const i of (r.issues || [])) all.push(i);
+  for (const nt of notes) all.push(nt);
+  const adv = (code) => all.filter((i) => i.severity === 'advisory' && i.code === code).length;
 
   const valid = results.filter((r) => r.validate.status === 'OK').length;
   const invalid = results.filter((r) => r.validate.status === 'FAIL').length;
@@ -271,8 +519,9 @@ function runDoctor(opts) {
   const unstamped = results.filter((r) => r.drift.status === 'UNSTAMPED').length;
   const numberWarn = results.filter((r) => r.numberForm.status === 'WARN').length;
   const migratable = oldFormat.filter((o) => o.migratable).length;
+  const trackAdvisories = all.filter((i) => i.severity === 'advisory').length;
 
-  const advisories = drift + unstamped + numberWarn + oldFormat.length;
+  const advisories = drift + unstamped + numberWarn + oldFormat.length + trackAdvisories;
   let exitCode = 0;
   if (invalid > 0) exitCode = 1;
   else if (strict && advisories > 0) exitCode = 2;
@@ -281,6 +530,8 @@ function runDoctor(opts) {
     sessionsDir,
     results,
     oldFormat,
+    notes,
+    hint,
     summary: {
       sessions: results.length,
       valid,
@@ -290,6 +541,9 @@ function runDoctor(opts) {
       numberWarn,
       oldFormat: oldFormat.length,
       migratable,
+      trackAdvisories,
+      stale: adv('STALE'),
+      ownerGone: adv('OWNER-GONE'),
     },
     exitCode,
   };
@@ -303,12 +557,18 @@ function renderHuman(report) {
     let line = '  ' + r.file + '  ';
     if (r.validate.status === 'FAIL') {
       line += `FAIL [${r.validate.stage}]: ${r.validate.problem}`;
+    } else if (r.validate.status === 'NO-RECORD') {
+      line += 'NO RECORD';
     } else {
       const tags = ['OK'];
+      if (r.multi && r.stateText) tags.push(r.stateText);
       if (r.drift.status === 'DRIFT') tags.push(`DRIFT (banner ${r.drift.bannerHash} · current ${r.drift.currentHash})`);
       else if (r.drift.status === 'UNSTAMPED') tags.push('UNSTAMPED (.md has no "generated from" token — re-save to stamp)');
       if (r.numberForm.status === 'WARN') tags.push(`WARN: ${r.numberForm.detail}`);
       line += tags.join(' · ');
+    }
+    for (const i of (r.issues || [])) {
+      line += i.severity === 'info' ? ` · note: ${i.message}` : ` · ${i.code}: ${i.message}`;
     }
     lines.push(line);
   }
@@ -316,8 +576,14 @@ function renderHuman(report) {
   const s = report.summary;
   lines.unshift(
     `session doctor · ${report.sessionsDir}\n` +
-    `${s.sessions} session(s) · ${s.valid} valid · ${s.invalid} invalid · ${s.drift} drift · ${s.oldFormat} old-format`,
+    `${s.sessions} ${report.results.some((r) => r.multi) ? 'track record(s)' : 'session(s)'} · ${s.valid} valid · ${s.invalid} invalid · ${s.drift} drift · ${s.oldFormat} old-format`,
   );
+
+  if (report.notes && report.notes.length) {
+    lines.push('');
+    lines.push(`Folder notes (${report.notes.length}):`);
+    for (const n of report.notes) lines.push(`  ${n.dir}  ${n.severity === 'info' ? 'note' : n.code}: ${n.message}`);
+  }
 
   if (report.oldFormat.length) {
     lines.push('');
@@ -336,6 +602,14 @@ function renderHuman(report) {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
+/** '36h' | '3d' | '90m' | '48' (hours) -> ms. */
+function parseDuration(v) {
+  const m = /^(\d+(?:\.\d+)?)([mhd]?)$/.exec(String(v).trim());
+  if (!m || !(Number(m[1]) > 0)) throw new Error(`--stale-after '${v}' is not a duration (use 90m, 36h or 3d)`);
+  const unit = m[2] || 'h';
+  return Math.round(Number(m[1]) * { m: 60000, h: 3600000, d: 86400000 }[unit]);
+}
+
 function parseArgv(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
@@ -348,6 +622,8 @@ function parseArgv(argv) {
       case '--sessions-dir': opts.sessionsDir = next(); break;
       case '--json': opts.json = true; break;
       case '--strict': opts.strict = true; break;
+      case '--track': opts.track = next(); break;
+      case '--stale-after': opts.staleMs = parseDuration(next()); break;
       case '-h': case '--help': opts.help = true; break;
       default: throw new Error(`unknown argument '${a}'`);
     }
@@ -356,7 +632,7 @@ function parseArgv(argv) {
 }
 
 const USAGE = `tpm-session-doctor — READ-ONLY session-store validator + drift detector (#1119)
-  run: tpm session doctor [--sessions-dir <dir>] [--json] [--strict]
+  run: tpm session doctor [--sessions-dir <dir>] [--json] [--strict] [--track <letter|claude-id>] [--stale-after <3d|36h|90m>]
 
   --sessions-dir <dir>  OPTIONAL (F4)  the sessions store (READ-ONLY). Omitted → resolved from the LOCAL
                                   project's .claude/claude-tpm/config.json (session.notes.sessionsDir); the
@@ -365,7 +641,13 @@ const USAGE = `tpm-session-doctor — READ-ONLY session-store validator + drift 
                                   (session-<NNNN>/session-<NNNN>.json); old-format 3-file dirs detected too
   --json                emit the structured report as JSON
   --strict              promote advisories (drift / unstamped / old-format / number-form) to exit 2
+  --track <t>           only that track (a letter, or >= 8 chars of its owner's Claude session id)
+  --stale-after <d>     report an UNSEALED track with no write for longer than this (default 3d; 90m, 36h, 3d)
   --help                show this usage
+
+Per-track checks (report-only): stale unsealed track; unsealed track whose owner process is gone (each with the
+"close --track x --confirm" hint); seal marker without a record; two records claiming one track; file name vs meta.track;
+leftover .lock* / *.tmp files.
 
 Exit: 0 = healthy (advisories allowed) · 1 = a validation FAIL · 2 = --strict + an advisory.
 STRICTLY READ-ONLY: no --fix, no write path. Old-format sessions are DETECTED + a migrate command
@@ -395,7 +677,7 @@ function main(argv) {
     return report.exitCode;
   } catch (e) {
     process.stderr.write('tpm-session-doctor: ' + String(e.message) + '\n');
-    return 1;
+    return e instanceof T.TrackError ? e.exitCode : 1;
   }
 }
 
@@ -405,6 +687,7 @@ module.exports = {
   checkDrift,
   checkNumberForm,
   checkOldFormat,
+  auditTrack,
   renderHuman,
   main,
 };

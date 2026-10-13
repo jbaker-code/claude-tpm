@@ -1,0 +1,41 @@
+== PRIOR SESSION 0001 · <SD>/session-0001/ · 3 parallel tracks ==
+=== TRACK a · SEALED by its owner 2026-10-05T00:05:36-07:00 ===
+files: <SD>/session-0001/session-0001.json · <SD>/session-0001/session-0001.md
+--- HANDOFF (read fully) ---
+**Where we are:**
+Config work finished except the retry test.
+
+**Next:**
+Re-run the retry test under load.
+--- OPEN PUNCHLIST (1) ---
+#1a.1 · fix flaky retry test  [0001ai1]
+for full detail: read <SD>/session-0001/session-0001.md, or run: tpm session export --sessions-dir <SD> --session 0001 --track a --style human
+=== TRACK b · SEALED AS ABANDONED 2026-10-05T00:05:36-07:00 by claude dddddddd (abandoned, "owner window closed"); no final handoff was written ===
+files: <SD>/session-0001/session-0001-b.json · <SD>/session-0001/session-0001-b.md   (the .md banner may still say "open": the seal marker is authoritative)
+--- LAST-SAVED HANDOFF (not a final handoff; read fully) ---
+**Where we are:**
+Exporter half ported.
+
+**Next:**
+Finish exporter then docs.
+--- OPEN PUNCHLIST (2) ---
+#1b.1 · port the exporter  [0001bi1]
+#1b.2 · write exporter docs  [0001bi2]
+for full detail: read <SD>/session-0001/session-0001-b.md, or run: tpm session export --sessions-dir <SD> --session 0001 --track b --style human
+=== TRACK c · STILL LIVE (handoff may not be final); last save 2026-10-05T00:05:36-07:00; owner process gone ===
+files: <SD>/session-0001/session-0001-c.json · <SD>/session-0001/session-0001-c.md
+--- HANDOFF (read fully) ---
+**Where we are:**
+Lock benchmark in progress.
+
+**Next:**
+Record numbers in the doc.
+--- OPEN PUNCHLIST (1) ---
+#1c.1 · benchmark the lock  [0001ci1]
+for full detail: read <SD>/session-0001/session-0001-c.md, or run: tpm session export --sessions-dir <SD> --session 0001 --track c --style human
+== OPEN PUNCHLIST, ALL TRACKS ABOVE (4) ==
+#1a.1 [track a] · fix flaky retry test  [0001ai1]
+#1b.1 [track b] · port the exporter  [0001bi1]
+#1b.2 [track b] · write exporter docs  [0001bi2]
+#1c.1 [track c, live] · benchmark the lock  [0001ci1]
+These tracks ran independently (parallel trains, not a sequence). Reconcile them before acting; a LIVE track may still change.

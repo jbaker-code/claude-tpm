@@ -1,7 +1,7 @@
 # Session-notes format — the JSON-first session memory + a human-reading reference
 
-**What this is.** The canonical shape of a session's memory. Each `session-NNNN/` folder holds **two
-files**: ONE canonical `session-NNNN.json` (the single source of truth) and ONE derived
+**What this is.** The canonical shape of a session's memory. Each `session-NNNN/` folder holds, per track, **two
+files** (a single-instance session is just track a; see "Tracks" below): ONE canonical `session-NNNN.json` (the single source of truth) and ONE derived
 `session-NNNN.md` (a human-readable view with `## Handoff` / `## Punchlist` / `## Log` sections). Both
 are prefixed with the four-digit session number, so no two sessions share a basename if pulled into a
 shared folder. The tools under `tools/session/` OWN these formats — the orchestrator never hand-emits
@@ -43,6 +43,82 @@ allocated by `tpm session current --open` (idempotent). The canonical record car
 unknown-newer schema is refused by the migrate step (so a corrupt or future record is skipped, never
 crashed on), and an old 3-file markdown session is converted only by the opt-in `tpm session migrate`
 (see "Version gate + migration").
+
+## Tracks — more than one Claude instance in one session folder
+
+A `session-NNNN/` folder holds **one record per track** (one per Claude instance working in it), not one record per folder.
+Layout of a two-track folder that has seen an abandoned seal (this is what the tools wrote in a scratch store):
+
+```
+session-0001/
+  session-0001.json        track a  (the unsuffixed, pre-tracks name: an old single record IS track a)
+  session-0001.md          track a  derived view
+  session-0001-b.json      track b  (b..z, at most 26 tracks)
+  session-0001-b.md        track b  derived view
+  session-0001-b.sealed    optional marker: track b was sealed by ANOTHER instance (abandoned seal)
+  .session-0001-b.sealed.unsealed-20261007T2256100700    audit copy left when a marker is undone
+.current-session.json      (in the sessions dir) a non-authoritative hint, derived from the tracks
+```
+
+**Ownership is additive `meta`.** Each track record carries, inside `meta`, who owns it. Real values from a scratch record:
+
+```json
+"meta": {
+  "number": "0001", "track": "b",
+  "sessionIds": ["bbbb2222-0000"],
+  "claudeSessionId": "bbbb2222-0000",      // the CURRENT owner (what "which track is mine" matches)
+  "claudePid": null, "claudePidStartedAt": null,   // liveness evidence; null when unavailable
+  "hostname": "admins-Virtual-Machine.local",
+  "openedAt": "...", "closedAt": null, "tpmVersion": "0.0.0",
+  "lastWriter": { "version": "0.2.0-dev", "at": "2026-10-07T22:56:09-07:00" }
+}
+```
+
+- `track`, `claudeSessionId`, `claudePid`, `claudePidStartedAt`, `hostname` are the ownership fields; `sessionIds[]` is every Claude id that ever
+  wrote the track. Matching is by the **current** `claudeSessionId`, never by `sessionIds`.
+- **`meta.lastWriter {version, at}`** is stamped by every write: the tpm version that wrote and when. It lets a newer tool see that a record was last
+  touched by an older one. Informational only; nothing gates on it.
+- `meta.adoptions[]` (only after an `--adopt`): `{ at, from {claudeSessionId, claudePid, hostname}, via }` (observed `via`: `"adopt --even-if-running"`); the new owner's id replaces `claudeSessionId` and is appended to `sessionIds`.
+- A pre-tracks record (no `claudeSessionId`) is still owned if its `sessionIds[]` is non-empty: the owner is read from the last entry (observed: a record with `sessionIds:["old"]` is refused to a different instance as `owner old`, exit 3). Only a record with an **empty** `sessionIds[]` and no ownership fields is **unowned**: it is track a, and the first instance to `--open` resumes it (observed: exit 0, `gate: "resume"`).
+
+**There is NO `schemaVersion` bump.** Every track record is still `"schemaVersion": "1.0.0"`. The new keys are additive inside `meta`, and unknown
+fields survive a round trip. Observed with the frozen `../old/claude-tpm-0.2.0` reader (read-only): it reads track a normally and silently skips
+`session-NNNN-b.json` (a name it does not recognise); it never crashes on a new record (`tracks-lifecycle.test.js`, L12).
+
+**What "sealed" means — exactly one rule (`trackState()` in `tools/session/lib/session-tracks.js`).** A track is sealed if EITHER:
+
+1. its own record has `meta.closedAt` set (its owner ran `tpm session close`: a *handoff-bearing* seal), OR
+2. a `session-NNNN[-x].sealed` marker file sits beside it (another instance sealed it as **abandoned**: no handoff is written; the record is untouched).
+
+The marker is JSON: `{ schema: 1, kind: "seal-marker", number, track, reason ("abandoned" | "seal-and-new"), note, sealedAt, sealedBy {claudeSessionId, claudePid, claudePidStartedAt, hostname, track}, ownerAtSeal, lastSaveSeen, lastWriter }`.
+Undoing it (`tpm session unseal`) renames the marker to the hidden audit file above. A track whose owner closed it itself is never guarded by a
+marker. A sealed track refuses writes from its owner (`ETRACK_SEALED`); the sealed record itself is never rewritten by the sealer.
+
+**The hint.** `.current-session.json` is derived from the tracks and kept true (`closedAt` is `null` iff some track of that session is unsealed), only so older
+tpm versions that read it keep working. New code never decides "current" from it.
+
+**Atomicity.** Every write described here is atomic: the canonical JSON, the derived `.md` (temp + rename, written only after the JSON), the track-record
+claim (`link` from a prepared temp, never an overwrite), the `.sealed` marker and the hint.
+
+## Reading across tracks
+
+Ids, slugs and the pickup, as built (each shown in `tools/session/tpm-session-ops.md`, `tpm-session-boot-read.md`, `tpm-session-export.md`).
+
+- **Ids.** Item ids are minted per track: track a keeps the stored form `1.4`, tracks b..z are stored as `1b.4`. `--item` takes either the stored
+  or the lettered form (`1a.4`, `#1a.4`). Printed ids carry the letter only when the session has more than one track.
+- **Slugs are unique per record, not globally.** Two tracks of one session can each hold an item with slug `alpha` (observed: `added #1a.1 [alpha]`, then
+  `added #1b.1 [alpha]`). A bare slug resolves in YOUR track's record first; across tracks use the lettered id.
+- **Another track's item is read-only to you.** `punchlist close|reopen|drop` on it is refused (`ECROSS_TRACK`, exit 1) and writes nothing.
+- **Carry-forward keeps provenance.** `carry-in` from a track's record stamps `fromSession` with the session number plus the track letter
+  (`0001b`; track a stays `0001`).
+- **The pickup.** A new session's `boot-read` prints one block per pending track (state: sealed by its owner / sealed as abandoned / still live / left open),
+  each track's handoff, and one combined open list tagged by track. A track is left out only when a LATER session opened strictly after the track settled
+  (sealed, or for a never-closed legacy record its last write); a live track is always shown. Nothing is stored for this: it is recomputed from timestamps.
+- **Merged reads.** `export --style human` of a multi-track session is ONE document (a table of tracks, each track's section, the combined open punchlist).
+  JSON is one record per track. With `--combine per-file` the JSON names keep the letter (`session-0001-b.json`) but the human export is a single merged
+  `session-0001.md` - not one `.md` per track.
+- **Doctor.** Checks every track against its own `.md`; reports `OWNER-GONE`, `STALE`, `TRACK-MISMATCH` (including a file that collides with another
+  claimant - one finding, not two), a stray `session-NNNN-a.json` (`DUPLICATE-TRACK`), orphan markers and lock leftovers.
 
 ## The canonical record — `session-NNNN.json`
 
@@ -93,7 +169,7 @@ The source of truth (verified shape):
   `type:"decision"` (`what` + `why`), with an ISO-TZ `ts`.
 - **`punchlist[]`** — each item has an `id` (`#<session>.<n>`), a durable base36 `slug`, `text`, a
   `state` (`open`/`closed`/dropped), `createdAt`, and an `events[]` audit trail (`add`/`close`/`reopen`/
-  `drop`/`carry-in`). See `tpm-session-ops.md` for the full verb + carry-in mechanics.
+  `drop`/`carry-in`). The slug is unique within one record only (see "Reading across tracks"). See `tpm-session-ops.md` for the full verb + carry-in mechanics.
 
 ## The derived view — `session-NNNN.md`
 
@@ -157,9 +233,9 @@ why: because Y
 ## The close-guard + immutability
 
 `ops close` is the seal. It **REFUSES (exit 1, naming what's missing) unless a handoff AND at least one
-punchlist item are present**; otherwise it stamps `meta.closedAt`. The current-session pointer is closed
-separately by `tpm session current --seal`, so the next bare `tpm-session` opens fresh instead of
-reusing the folder. `claude-context/` is off-limits to subagent writes
+punchlist item are present**; otherwise it stamps `meta.closedAt`. The current-session hint is refreshed
+by `tpm session current --seal` (it closes only when no track of the session is still unsealed), so the next
+bare `tpm-session` opens fresh instead of reusing the folder. `claude-context/` is off-limits to subagent writes
 (`project-workspace.md` §"Subagent write boundaries"), so a subagent never touches session memory at all.
 
 ## Version gate + migration (opt-in, no silent back-compat)
@@ -168,9 +244,11 @@ The `lib/` model reads records at `schemaVersion 1.0.0`; an unknown-newer schema
 migrate step and simply skipped (never crashed on) — this is why `boot-read` and `doctor` degrade
 cleanly. Old 3-file markdown sessions are **not** read in place: `tpm session migrate --in <dir>
 --out-dir <dir>` is the opt-in converter that rewrites ONE old session into the canonical JSON, and
-`tpm session doctor` detects drift and suggests a migrate. `boot-read` iterates priors descending and
-emits the highest readable record, ignoring anything it can't parse; if none qualify it reports the
-first-session case. It always exits 0.
+`tpm session doctor` detects drift and suggests a migrate. `boot-read` walks prior sessions newest first and
+emits every pending track (see "Reading across tracks"), skipping and listing anything it can't parse; if none qualify it
+reports the first-session case. It exits 0 on every data problem; the one non-zero exit is a malformed command line
+(`--track` with no value, exit 2). A migrated record's `handoff.updatedAt` is the source's own latest real timestamp (an
+explicit `--now` overrides it); a legacy session migrated by an older build carries the now-stamp of its migration instead.
 
 ## Timestamps — ISO-8601 with a real timezone offset
 

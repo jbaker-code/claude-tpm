@@ -13,7 +13,7 @@ migrator — it never writes, mutates, migrates, converts, or re-renders anythin
 ## Usage
 
 ```
-tpm session doctor --sessions-dir <dir> [--json] [--strict]
+tpm session doctor --sessions-dir <dir> [--json] [--strict] [--track <letter|claude-id>] [--stale-after <3d|36h|90m>]
 ```
 
 | Flag | |
@@ -21,6 +21,8 @@ tpm session doctor --sessions-dir <dir> [--json] [--strict]
 | `--sessions-dir <dir>` | **Optional:** omitted, it is resolved from the project root's `.claude/claude-tpm/config.json` (`session.notes.sessionsDir`); the flag overrides. The sessions store. Canonical `session-<NNNN>.json` is discovered both flat at the top AND in the canonical **nested** per-session-dir layout `session-<NNNN>/session-<NNNN>.json` (the live store's shape); old-format 3-file subdirectories are detected too. Read-only. |
 | `--json` | Emit the structured report as JSON instead of human text. |
 | `--strict` | Promote advisories (drift / unstamped / old-format / number-form) to a non-zero exit. |
+| `--track <t>` | Only that track: one letter a-z, or at least 8 characters of its owner's Claude session id. Malformed = exit 2; no match = exit 1. |
+| `--stale-after <d>` | An UNSEALED track with no write for longer than this is reported (default `3d`; `90m`, `36h`, `3d`; a bare number is hours). |
 | `--help` | Show usage. |
 
 Bare `node`, no `bin` (Q5). Programmatic callers `require()` it for `runDoctor(opts) -> report`.
@@ -115,3 +117,38 @@ byte-snapshots every file, runs the doctor in all three modes (in-process + the 
 re-snapshots and asserts every file is byte-identical and none was created or deleted. The drift and
 validate checks are mutation-proven (forcing drift to OK, or dropping the payload validator, turns
 the matrix red).
+
+## Tracks (multi-session support)
+
+A session folder holds one record per **track** (`session-NNNN.json` = track a, `session-NNNN-b.json` ... = tracks b..z, each
+with its OWN derived `.md`, plus `.sealed` markers). The doctor reads them all; every record is drift-checked against ITS OWN
+`.md` (it used to compare every record with track a's). Sealed-ness comes from `trackState` (a marker wins), never from the
+record's `closedAt` or the `.md`. A folder holding only `-b`/`-c` records is current-format, not old-format. A lone healthy
+track a prints exactly the line it always did; a multi-track session adds `SEALED by owner` / `SEALED by marker (...)` / `live`
+and the owner after `OK`.
+
+Report-only checks (each counts toward `--strict` unless marked note; none of them changes anything):
+
+| Code | What | Hint |
+|---|---|---|
+| `STALE` | unsealed track, no write for longer than `--stale-after` | `tpm session close --session NNNN --track x --confirm --reason "abandoned"` (the abandoned seal: deletes nothing) |
+| `OWNER-GONE` | unsealed track whose owner process on this host is gone (a recorded pid on another host is never judged) | same |
+| `MARKER-WITHOUT-RECORD` | a `.sealed` marker with no `.json` beside it | |
+| `MARKER-UNREADABLE` | the marker cannot be parsed (the track still reads as sealed) | |
+| `DUPLICATE-TRACK` | a stray `session-NNNN-a.json` beside the real `session-NNNN.json` (both claim track a). Printed as a folder note. | move the extra one out |
+| `TRACK-MISMATCH` | the file name and `meta.track` disagree (or `meta.track` is absent on a b..z file). If the claimed track is also claimed by another file, the SAME finding says so (`it collides with session-0001-c.json, which also claims track c`) - one root cause is one finding, not a TRACK-MISMATCH plus a DUPLICATE-TRACK per file. | keep the real record, move the other out |
+| `LOCK-STALE` / `LOCK-INCOMPLETE` / `LOCK-LEFTOVER` | `session-NNNN/.lock` stale / unreadable / `.lock.new.*`, `.lock.rel.*`, `.lock.broken.*` left behind | |
+| `LEFTOVER-TMP` | a `*.tmp` older than a minute (interrupted write) | |
+| `UNRECOGNISED` | a `*.json` / `.sealed`-looking name that is not a track file (`session-notes.md` stays silent) | |
+| note: `MARKER-STALE-RECORD`, `MD-MISSING`, `MD-WITHOUT-RECORD`, `LOCK-HELD`, `LOCK-NO-GITIGNORE`, `HINT-DISAGREES` | informational, never counted | |
+
+Dot-names (`.lock`, `.current-session.json`) are never sessions. The old stderr line "N track record file(s) are not checked by
+this version" is gone: every track is checked.
+
+Real output (scratch store; `session-0001-c.json` copied to `session-0001-d.json`), one finding on the `d` row and none on `c`:
+
+```
+  session-0001/session-0001-d.json  OK · live · owner cccccccc · TRACK-MISMATCH: session-0001-d.json is named for track d but its meta.track says "c"; it collides with session-0001-c.json, which also claims track c (keep the real record, move the other out of the folder) · note: session-0001-d.md (the derived file) is missing; ...
+```
+
+A stray `session-0001-a.json` copy of track a still prints `DUPLICATE-TRACK` (as a `Folder notes` line) and is not folded into anything. Both runs exit 0 (the doctor reports; `--strict` is what turns findings into a non-zero exit).

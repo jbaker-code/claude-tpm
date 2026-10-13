@@ -63,6 +63,8 @@
  *   --project-root <p>   Optional. If given, emits the env-source ritual (step zero)
  *                        with the task folder derived from --phase-dir.
  *   --out <path>         Optional. Write to a file instead of stdout.
+ *   --session <ref>      Optional. Attribute the prompt to a session (0012b, or 0012 with --track b); default: auto-resolved.
+ *   --track <letter>     Optional. Track letter a-z, used with --session.
  *   --help               Print this message.
  *
  * OUTPUT. The composed prompt to stdout (or --out). Exit 0 on success, 2 on a
@@ -180,8 +182,15 @@ function parseArgs(argv) {
     else if (a === '--epic') opts.epic = argv[++i];
     else if (a === '--project-root') opts.projectRoot = argv[++i];
     else if (a === '--out') opts.out = argv[++i];
+    else if (a === '--session') opts.session = argv[++i];
+    else if (a === '--track') opts.track = argv[++i];
     else if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
     else { console.error('Unknown arg: ' + a); process.exit(2); }
+  }
+  if (opts.session !== undefined || opts.track !== undefined) {
+    const x = require('../lib/attribution').parseExplicit({ session: opts.session, track: opts.track });
+    if (!x.ok) { console.error(x.error); process.exit(2); }
+    opts.explicitSession = x.ref;
   }
   return opts;
 }
@@ -219,6 +228,13 @@ function compose(opts) {
   // the round identity (the phase folder) that the user's "kick it off" sign-off token must match.
   // Harmless to the subagent — it's an HTML comment.
   L.push(`<!-- tpm-workflow-spawn phase="${phaseDir}" role="${role}" -->`);
+  // Phase 18: a SEPARATE informational comment (NEVER an attribute of the marker — tpm-workflow-doctor's regex is strict).
+  // Omitted when no session resolves. Never throws.
+  try {
+    const att = require('../lib/attribution');
+    const f = att.toEventFields(att.resolveAttribution({ explicit: opts.explicitSession || null }));
+    if (f.session) L.push(`<!-- tpm-session session="${f.session}" via="${f.sessionVia}" -->`);
+  } catch (_e) { /* stamping never blocks */ }
   L.push('');
   L.push('Working folder (write ONLY inside here; quote paths — they contain spaces):');
   L.push('`' + phaseDir + '`');

@@ -4,7 +4,11 @@ tpm-session is disabled by config (`session.enabled: false`) — say "session li
 <!-- tpm:if session.enabled -->
 ## `tpm-session close` — wrap-up ritual
 
-**A subagent must never run this skill.** `close` wraps up the orchestrator's own session (reap, session-notes seal, sign-off) — a worker's lifecycle is its spawn prompt + its working folder's `plan.md`, not this. If you were spawned as a subagent and somehow reached this, STOP and follow your spawn prompt instead.
+**A subagent must never run this skill.**
+
+<!-- tpm:inject foreign-gate -->
+
+`close` wraps up the orchestrator's own session (reap, session-notes seal, sign-off) — a worker's lifecycle is its spawn prompt + its working folder's `plan.md`, not this. If you were spawned as a subagent and somehow reached this, STOP and follow your spawn prompt instead.
 
 Step A. **Run the reap ritual.** Call `/tpm-reap`. `close` just triggers it. **NEVER auto-kills** — enumerate, explicit user choice, double-confirm for "all", close only the confirmed, per `tpm-reap`'s own ritual. Silent (no prompt) if `tpm-reap` finds nothing running.
 
@@ -13,7 +17,11 @@ Step B. **Finalize session notes — the save ritual below, verbatim (its own nu
 
 <!-- tpm:inject save-ritual -->
 
-Step C. **Seal the session.** After the save ritual finishes, run `tpm session close --session <NNNN>` — the seal. It **REFUSES (exit 1, naming what's missing) unless a handoff AND at least one punchlist item are present**; otherwise it stamps `meta.closedAt`. Then run `tpm session current --seal` to mark the current-session pointer closed, so the NEXT bare `tpm-session` invocation (this session or a future one) opens fresh instead of reusing this folder.
+**Closing seals ONLY your own track** (found by your Claude session id); other instances' tracks are never touched.
+
+<!-- tpm:inject multi-track -->
+
+Step C. **Seal the session.** After the save ritual finishes, run `tpm session close --session <NNNN>` — the seal. It **REFUSES (exit 1, naming what's missing) unless a handoff AND at least one punchlist item are present**; otherwise it stamps `meta.closedAt`. Then run `tpm session current --seal` — it closes the current-session hint only when NO track of the session is still unsealed (and says so, leaving the hint open, when another track is still live), so the NEXT bare `tpm-session` invocation opens fresh instead of reusing this folder. It is safe to run either way; it never seals a track itself.
 
 Tools for this mode:
 

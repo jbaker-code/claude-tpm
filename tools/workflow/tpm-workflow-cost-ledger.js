@@ -56,6 +56,8 @@
  *   --verdict <text>   ACCEPT | ACCEPT-W-EXC | FAIL | SHIPPED | n/a | ...
  *   --round <text>     round / phase label (free text).
  *   --note <text>      anything worth keeping (fix-loop count, retries, etc.).
+ *   --session <ref>    attribute the row to a session (0012, 0012b, 12b or session-0012b); default: auto-resolved.
+ *   --track <letter>   track letter a-z, used with --session (e.g. --session 0012 --track b).
  *   --date <YYYY-MM-DD> override the auto-stamped date (default: today, in --tz).
  *   --tz <IANA zone>   timezone for the auto-stamped date (default:
  *                      COST_LEDGER_TZ env var, else America/Los_Angeles).
@@ -71,6 +73,8 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+// Phase 18 — informational session stamp (shared resolver; never throws, never blocks).
+const { resolveAttribution, toEventFields, parseExplicit } = require('../lib/attribution');
 
 function arg(name, def) {
   const i = process.argv.indexOf(`--${name}`);
@@ -91,6 +95,8 @@ if (arg('help') === true || arg('h') === true ||
   console.log('');
   console.log('Modifiers: --summary  --agent --role --model --tokens --calls --verdict');
   console.log('           --round --note --date --tz --file --help');
+  console.log('  --session <ref>     attribute the row to a session (0012b, or 0012 with --track b); default: auto-resolved');
+  console.log('  --track <letter>    track letter a-z, used with --session');
   process.exit(0);
 }
 
@@ -128,8 +134,8 @@ const HEADER = [
   "notification's usage figures. `tokens` is authoritative (the subagent can't introspect its own);",
   '`calls` is the subagent-observable cross-check. Append-only — run `tpm-workflow-cost-ledger.js --summary` for totals.',
   '',
-  '| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes |',
-  '|------|---------------|-------|------|-------|-------:|------:|---------|-------|',
+  '| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes | Session |',
+  '|------|---------------|-------|------|-------|-------:|------:|---------|-------|---------|',
   '',
 ].join('\n');
 
@@ -251,6 +257,18 @@ if (arg('summary') === true) {
 // --- APPEND mode --------------------------------------------------------------
 const tz = (arg('tz', null) && arg('tz') !== true) ? arg('tz') : null;
 const date = (arg('date', null) && arg('date') !== true) ? arg('date') : todayInZone(tz);
+// Optional --session/--track (same parseExplicit rules; malformed -> exit 2 before any write).
+let explicitRef = null;
+if (arg('session') !== undefined || arg('track') !== undefined) {
+  const x = parseExplicit({
+    session: arg('session') === true ? '' : arg('session'),
+    track: arg('track') === true ? '' : arg('track'),
+  });
+  if (!x.ok) { console.error('cost-ledger: ' + x.error); process.exit(2); }
+  explicitRef = x.ref;
+}
+let sessionCell = '';
+try { sessionCell = toEventFields(resolveAttribution({ explicit: explicitRef })).session || ''; } catch (_e) { /* blank */ }
 const row = `| ${[
   date,
   cell(arg('round', '')),
@@ -261,11 +279,25 @@ const row = `| ${[
   fmt(parseCount(arg('calls'))),
   cell(arg('verdict', '')),
   cell(arg('note', '')),
+  sessionCell,
 ].join(' | ')} |`;
 
 fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
 if (!fs.existsSync(ledgerPath)) fs.writeFileSync(ledgerPath, HEADER);
 let body = fs.readFileSync(ledgerPath, 'utf8').replace(/\s*$/, '');
+// Q-E: an existing ledger whose header is EXACTLY the shipped 9-col header gains a trailing Session column
+// (header + separator only; old rows are left untouched — GFM tolerates short rows). Any other header is left alone.
+const OLD_HDR = '| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes |';
+const OLD_SEP = '|------|---------------|-------|------|-------|-------:|------:|---------|-------|';
+{
+  const lines = body.split('\n');
+  const hi = lines.findIndex(l => l.trimEnd() === OLD_HDR);
+  if (hi !== -1 && lines[hi + 1] !== undefined && lines[hi + 1].trimEnd() === OLD_SEP) {
+    lines[hi] = OLD_HDR + ' Session |';
+    lines[hi + 1] = OLD_SEP + '---------|';
+    body = lines.join('\n');
+  }
+}
 fs.writeFileSync(ledgerPath, body + '\n' + row + '\n');
 console.log(`cost-ledger: appended to ${ledgerPath}`);
 console.log(`  ${row}`);

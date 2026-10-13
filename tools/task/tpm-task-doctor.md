@@ -35,7 +35,7 @@ Programmatic callers `require()` it for `runDoctor(opts) -> report`.
 
 ---
 
-## The four checks
+## The checks (four store checks + lock health, id health, last-writer flag)
 
 Bodies are discovered by `task-model.listBodyPaths` — the NESTED `bodies/<bucket>/task-<id>.json`
 layout, the store's real shape (a task store is a single dir, so detection is whole-store, not the
@@ -71,6 +71,17 @@ session doctor's per-subdir sweep).
    one is detected the doctor reports it + **SUGGESTS `tpm task migrate`** and stops. A `MigrateError`
    refusal means "not a clean old store" → falls through to checks 1–3. Never migrates.
 
+5. **Lock health (multi-session).** `<tasksDir>/.lock` is inspected with the same `lock.inspect` / `isStale` the verbs use (one stale rule). Prints nothing when there is no lock.
+   - `HELD` — a live holder inside the 30 s limit; normal while a verb runs; **not** a problem.
+   - `STALE` — holder dead/reused on this host, or held past the limit → **problem** (any task verb will break it loudly, or inspect it).
+   - `INCOMPLETE` — the directory has no readable `owner.json`; never auto-broken → **problem** (move it aside by hand once no tpm process runs).
+   - `UNIGNORED` — a lock directory without its self-ignoring `.gitignore`, so it could be committed → **problem**.
+   - Leftover `.lock.broken.*` / `.lock.new.*` / `.lock.rel.*` directories are listed (advisory; a `.broken.*` dir means a holder died, so check drift and `reindex` if in doubt); one lacking a `.gitignore` is a **problem**.
+
+6. **Id health.** The lock prevents duplicate ids; this reports them if they ever happened (an old tool, a hand edit, a merge). Each is a **problem**, report-only: `DUPLICATE` (two bodies carry one in-file id), `FILENAME-MISMATCH` (`task-1005.json` holding id 1001), `DUP-ROW` (an id twice in the index), `NEXTID-REGRESSED` (`nextId` <= the highest body id: the next `add` would overwrite a body), `UNINDEXED` (a body with no index row), `ORPHAN-ROW` (a row whose body is gone). Suggests `tpm task reindex` (a duplicate id needs a human to renumber one body first). Silent on a healthy store.
+
+7. **Last-writer flag (advisory).** `tasks-index.json.lastWriter` is `{version, at}`, stamped under the lock by every mutating verb. The doctor FLAGS (exit unchanged) a store last written by an **UNSTAMPED** tool (no stamp) or an **OLDER** tpm (stamped version < this one, compared on `x.y.z`): an older tool ignores the lock and can lose updates. Silent when the last writer is this version or newer.
+
 ---
 
 ## Exit codes
@@ -78,7 +89,7 @@ session doctor's per-subdir sweep).
 | Code | Meaning |
 |---|---|
 | `0` | Clean store — no problems. Advisories (`UNSTAMPED`, a missing `.md`) are allowed and do NOT flip it. |
-| `1` | Problems found — an invalid record, hash-drift, a label-index `MISMATCH`/`MISSING`/`CORRUPT`, OR a detected old-format store. Still report-only; nothing is written. |
+| `1` | Problems found — an invalid record, hash-drift, a label-index `MISMATCH`/`MISSING`/`CORRUPT`, a `STALE`/`INCOMPLETE`/`UNIGNORED` lock, any id-health problem, OR a detected old-format store. Still report-only; nothing is written. |
 | `2` | Usage error — bad/unknown flag, missing `--tasks-dir` value, or an unreadable/non-directory store dir. |
 
 The advisory posture, verified: a body whose `.md` sibling is **missing** → `drift NONE`, exit
@@ -97,7 +108,7 @@ nonzero, so a strict/advisory split would only muddy it.)
   prints its own block with the migrate suggestion.
 - **`--json`:** `{ tasksDir, oldFormat, bodies:[{file, id, validate:{status,stage?,problem?},
   drift:{status,bannerHash?,currentHash?}}], labelIndex:{status,…}, summary:{bodies, valid, invalid,
-  drift, unstamped, labelIndex, oldFormat}, exitCode }`.
+  drift, unstamped, labelIndex, oldFormat, lock, idProblems, writer}, lock:{status,owner?,leftovers,…}, ids:{status,problems[]}, writer:{status,version?}, exitCode }`.
 
 Verified runs against scratch stores:
 
@@ -122,6 +133,38 @@ OLD-FORMAT task store detected (2 markdown body(ies), Next ID marker 1150).
       tpm task migrate --in "<old-markdown-store>" --out-dir "<choose-an-output-dir>"
 # exit 1
 ```
+
+Verified lock / writer runs (scratch stores; `<store>` abbreviates the path; the lock lines print only when there is something to say):
+
+```
+# a live verb holds the lock                                  -> exit 0 (HELD is not a problem)
+Lock: HELD by pid 46315 on admins-Virtual-Machine.local, verb edit, tpm 0.2.0-dev, taken 1 s ago (normal while a task verb runs; not a problem).
+
+# the holder was kill -9'd                                    -> exit 1
+Lock: STALE (process 46468 is not running) — held by pid 46468 on admins-Virtual-Machine.local, verb edit, tpm 0.2.0-dev, taken 1 s ago. PROBLEM, report-only:
+  run any task verb (it breaks a stale lock loudly), or inspect <store>/.lock
+
+# .lock exists with no owner.json                              -> exit 1
+Lock: INCOMPLETE — <store>/.lock exists but its owner record is missing or unreadable, so it cannot be judged stale. PROBLEM, report-only:
+  if no tpm process is running, move the directory aside by hand (e.g. mv .lock .lock.aside).
+  (it also has no .gitignore, so it could be committed.)
+
+# .lock/.gitignore removed from a held lock                    -> exit 1
+Lock: UNIGNORED — <store>/.lock has no .gitignore, so it could be committed. PROBLEM, report-only:
+  add a .gitignore containing "*" inside it (or move the directory aside once no verb is running).
+
+# after a stale lock was broken                                 -> exit 0 (advisory)
+Lock leftovers (1): .lock.broken.46523.1791414666477
+  a .broken.* dir is a stale lock that was broken: its holder died, so its last write may be incomplete — check the drift lines above; `tpm task reindex` if in doubt.
+
+# index stamped by an older tpm / by no stamp at all             -> exit 0 (advisory)
+Last writer: OLDER — this store was last written by tpm 0.1.5 (at 2026-10-07T16:11:24-07:00), older than this tpm 0.2.0-dev. An older tpm ignores the lock and can lose updates; use one tpm version per live store. (advisory)
+Last writer: UNSTAMPED — tasks-index.json carries no `lastWriter`, so this store was last written by a tpm that predates the stamp (this is 0.2.0-dev). An older tpm ignores the lock and can lose updates; use one tpm version per live store. (advisory)
+```
+
+`--json` on a healthy store carries `lock:{status:"NONE",lockDir,leftovers:[],leftoversUnignored:[]}`, `ids:{status:"OK",problems:[]}`, `writer:{status:"OK",version,at,running}` and the summary keys `lock`, `idProblems`, `writer`.
+
+**Clearing a stuck lock by hand:** see "Clearing a stuck lock by hand" in [`tpm-task.md`](./tpm-task.md#what-you-see) (`mv .lock .lock.aside`, only when no tpm process runs; then re-run the doctor and `reindex` if it reports drift). The doctor itself never touches the lock.
 
 ---
 

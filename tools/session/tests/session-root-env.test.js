@@ -66,6 +66,8 @@ test('session `current --open` from an unrelated cwd + env=fixture writes ONLY u
   const r = run('tpm-session-current.js', ['--open'], unrelated, fixture);
   assert.strictEqual(r.code, 0, r.stderr);
   assert.ok(fs.existsSync(path.join(fixtureSessions, '.current-session.json')), 'pointer written in the fixture');
+  // Tracks store: --open now also creates the session folder + the track-a record (all under the fixture).
+  assert.ok(fs.existsSync(path.join(fixtureSessions, 'session-0001', 'session-0001.json')), 'record created in the fixture');
   assert.ok(!fs.existsSync(path.join(unrelated, '.claude')), 'nothing created in the cwd');
   assert.ok(!fs.existsSync(otherSessions), 'the other project is untouched');
 });

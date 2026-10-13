@@ -23,6 +23,22 @@ const {
 
 const t = require('../tpm-task.js');
 
+// The ops now hold the store lock (a rename-based directory lock, tools/lib/lock.js) for their whole
+// read-modify-write. A blanket renameSync fault would therefore strike the LOCK ACQUIRE (ELOCK_IO) before the
+// persist this suite targets. withFailingFsAfterLock fails renameSync ONLY for non-lock paths (a rename whose
+// source or destination basename starts with `.lock`), so the fault still lands mid-persist, inside the lock.
+function withFailingFsAfterLock(fn) {
+  const real = fs.renameSync;
+  fs.renameSync = function failingStub(from, to) {
+    const isLock = [from, to].some((p) => /^\.lock(\.|$)/.test(require('path').basename(String(p))));
+    if (isLock) return real.apply(this, arguments);
+    const e = new Error('injected fs.renameSync failure');
+    e.code = 'EIO';
+    throw e;
+  };
+  try { return fn(); } finally { fs.renameSync = real; }
+}
+
 // Seed a valid, populated task (headline + a summary + two subtasks, one checked) via the ops.
 function seed(dir) {
   t.opAdd({ tasksDir: dir, headline: 'seeded task', summary: 'seed summary', labels: ['x'] }); // -> id 1000
@@ -39,7 +55,7 @@ test('opEdit under a forced RENAME fault: canonical JSON byte-unchanged, body .m
   const mdBefore = fs.readFileSync(bodyMdPath(dir, id), 'utf8');
 
   let threw = false;
-  withFailingFs('renameSync', () => {
+  withFailingFsAfterLock(() => {
     try {
       t.opEdit({ tasksDir: dir, id, headline: 'THIS MUST NOT LAND' });
     } catch (e) {

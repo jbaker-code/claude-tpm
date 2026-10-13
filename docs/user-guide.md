@@ -295,6 +295,94 @@ handoff (via `boot-read`) and resumes from its "Where we are / Next" head.
 
 That's the whole loop: `open` → work with `tpm-task` and `tpm-workflow` → `save` → `close`.
 
+### 5b. Running more than one Claude instance on a project
+
+You can have two or three Claude windows open on one project. Each instance works on its own **track** inside a session folder
+(`session-0001/` holds `session-0001.json` = track a, `session-0001-b.json` = track b, and so on). A track belongs to the Claude
+instance that opened it, identified by its Claude session id, so instances never write into each other's notes.
+
+**What the open gate asks, and why.** When you run `/tpm-session open` and the project already has an *unsealed* track that
+belongs to a different Claude instance, `tpm` does not guess whether that other instance is alive. It refuses to proceed, writes
+nothing, shows you the track (who, when it was opened, when it last wrote, and whether its process is `running`, `gone` or `unknown`)
+and asks you to choose:
+
+| Choice | Say this when | What happens |
+|---|---|---|
+| **adopt** (`--adopt <track>`) | "That track is mine" - typically after `/clear` or a restart gave your instance a new id. | Your id replaces the old one on that track. If its owner process is still running and is not you, `--even-if-running` is also required. |
+| **parallel** (`--parallel`) | "That instance is live; I am a second train." | You get the next free track letter in the same session, with an empty punchlist. |
+| **next** (`--next`) | "Leave those alone; start a new session number." | Opens `session-0002`, track a. The old tracks are untouched. |
+| **seal-and-new** (`--seal-and-new`) | "Those instances are dead; clean up and start fresh." | Marks every foreign unsealed track as abandoned (no handoff is written for it) and opens the next session number. Needs your explicit yes: without `--even-if-running` (or its alias `--confirm`) it seals nothing, prints what it would seal and exits 4. |
+
+The reason for the gate: a crashed instance and a live one look the same on disk, and silently joining or overwriting a live
+instance's notes would lose work. So the tool asks you; it never picks. If its own session id cannot be read and several tracks
+are unsealed it likewise asks you to name your track (`--track <letter>`).
+
+**The recommended habit: close -> clear -> open a new session.** When you finish a stretch of work: `/tpm-session close` (writes the
+handoff and seals *your* track only), then `/clear`, then `/tpm-session open`. A `/clear` gives the instance a new session id; closing
+first means there is no unsealed track of yours left behind to ask about, and the new session starts clean from the sealed handoff.
+If you skip the close and just `/clear`, the open gate shows your old track as owned by "another" session, with the evidence line `same Claude process as yours, but a different Claude session id (typical after /clear) - evidence for --adopt; not acted on automatically`, and you answer `adopt` (no `--even-if-running` needed, since the owner process is your own). After a proper close, the next open starts `session-0002`, track a, with no questions.
+
+**One behaviour to know (Q-C7).** `close` seals only your own track. If another instance's track in the same session is still live, then
+after you close yours, a write command run without `--track` (for example `tpm session note`) no longer finds a track of yours and is
+refused with `ENOT_OWNER` ("... belong to another Claude session; this write was refused"). Pass `--track <your letter>` if you really mean to
+write to your closed track, or `/tpm-session open` to start a new one. It is a known rough edge.
+
+**Seals you did not make.** If an instance is found dead, `tpm session close --session NNNN --track <letter>` seals it as abandoned (ask first;
+add `--even-if-running`, alias `--confirm`, only on a yes). If it turns out to have been alive, its next `save` is refused loudly ("was sealed by
+another session ... Nothing you saved earlier is lost") and `tpm session unseal --session NNNN --track <letter>` puts it back.
+
+**Reading what the other instances left.** The next `/tpm-session open` prints a pickup with one block per track, each labelled by how that track ended:
+`SEALED by its owner` (a normal close), `SEALED AS ABANDONED ... no final handoff was written` (someone sealed a dead instance), `STILL LIVE (handoff may not
+be final)`, or `LEFT OPEN (never closed ...)`. After the blocks comes one combined open-items list, each item tagged with its track. Real output from a three-track
+scratch run (a and b closed normally, c sealed as abandoned):
+
+```
+=== TRACK c · SEALED AS ABANDONED 2026-10-08T02:43:33-07:00 by claude dddddddd (abandoned, "window closed"); no final handoff was written ===
+--- LAST-SAVED HANDOFF (not a final handoff; read fully) ---
+== OPEN PUNCHLIST, ALL TRACKS ABOVE (3) ==
+#1a.1 [track a] · alpha item  [alpha]
+#1b.2 [track b] · beta follow-up  [9lf5eo]
+#1c.1 [track c] · gamma item  [igvidp]
+```
+
+The blocks are separate on purpose: the instances ran independently, so reconcile them before acting. A track is dropped from the pickup only once a later session
+opened after it was sealed; a live track is always shown. When you carry an item into the new session, the record remembers where it came from (`0001b` = session 0001, track b).
+`tpm session boot-read --track b` shows one track; `--track` with nothing after it is a usage error (exit 2), not a silent fallback.
+
+**Item ids and slugs.** Ids carry the track letter once a session has several tracks (`#1a.1`, `#1b.2`); you can type either `1.1` or `1a.1` for track a. Another
+track's items are read-only to you: `punchlist close` on `#1c.1` from track b is refused with `ECROSS_TRACK` and changes nothing. Slugs (the short bracketed names) are
+unique within one track's record, not across the whole project: two tracks can each have an item slugged `alpha`; a bare slug means *your* track's item.
+
+**Exports and health.** `tpm session export --session 0001 --style human` gives one merged document for the whole session (a table of tracks, then each track's section,
+then the combined open list). JSON export is one file per track; with `--combine per-file` the JSON files keep the letter (`session-0001-b.json`) but the human export is
+still a single `session-0001.md`, not one per track (`--track b` narrows it to `session-0001-b.md`). `tpm session doctor` checks every track and names stuck ones
+(`OWNER-GONE`, `STALE`); a file whose name and recorded track disagree is one `TRACK-MISMATCH` finding, even if it also collides with another file.
+`tpm session migrate` of an old session now records the session's own last-write time in the handoff, not the moment you ran migrate (pass `--now` to pin it); sessions
+migrated by older builds keep the migration-time stamp.
+
+**Which session did that?** With several instances writing to one project, tpm records who made each change. Every task history event
+carries `session` (for example `session-0012b`; track a is plain `session-0012`) and `sessionVia` (`flag`, `env` or `lookup`: how it was
+found). The cost ledger gets a `Session` column, sign-off tokens carry `tpmSession` / `tpmSessionVia`, and a composed spawn prompt carries a
+`<!-- tpm-session session="session-0012b" via="lookup" -->` line right after its `tpm-workflow-spawn` marker. You normally do nothing:
+tpm finds your track from your Claude session id. Order of precedence: a `--session` flag, then the `TPM_SESSION_ID` environment variable
+(a manual override for scripts, cron jobs or a shell outside any Claude session; a malformed value is silently ignored), then the lookup,
+then blank. A blank never blocks a write, and history written before this feature is not back-filled. Examples, each run:
+
+```
+tpm task history 1000                      # 2026-10-08T10:47:50-07:00  create  [session-0012b]
+tpm task add --headline "x" --session 0012 --track b     # same as --session 0012b
+tpm task list --session 12                 # tasks with an event from ANY track of session 12
+tpm task list --session 0012b              # only track b
+```
+
+`tpm task` and `tpm workflow cost|signoff|compose` accept `--session` / `--track` in both the combined (`0012b`) and two-flag forms; a malformed or
+disagreeing flag exits 2. (`tpm session` keeps its own rule: `--session 0012 --track b`.) The child-session launcher sets `TPM_SESSION_ID` for the child
+it starts; known limitation (#1175): that value names a session number, not a store, so it is right only while the child writes the launching
+project's store. Details: `tools/task/tpm-task.md` ("Session attribution").
+
+The full flag, state, exit-code and message reference, each run against the real tool, is in `tools/session/tpm-session-current.md` and
+`tools/session/tpm-session-ops.md`.
+
 ---
 
 ## Per-skill usage reference
@@ -343,7 +431,7 @@ reach for.
 **What `close` does, in order.** It runs the reap ritual (offer to close strays — never auto-kills),
 delegates to `save` to write the final checkpoint, seals the notes and the session pointer so the next
 `open` starts fresh instead of reusing this folder, nudges you to `/export` the transcript, and prints
-a terse sign-off (deliberately *not* the capabilities menu — you're stopping, not starting). Sealing is
+a terse sign-off (deliberately *not* the capabilities menu — you're stopping, not starting). Sealing seals *your* track only (see 5b for several instances). Sealing is
 the fix for the old "every close mints a new session folder" bug: `open` establishes the folder once
 and `save`/`close` only ever update it.
 
@@ -361,16 +449,17 @@ where you are without writing anything, run `/tpm-session info`.
 **The CLI underneath.** The skill drives `npx tpm session <verb>`:
 
 ```
-tpm session — session-notes tooling router
+tpm session — JSON-first session-notes tooling router
 
-Verbs:
-  config     resolve session config / sessions-dir (--json / --sessions-dir / --get / --modules)
-  current    the current-session pointer (--state / --open / --seal / --next-number)
-  ops        the notes WRITE surface (open / save / note / punchlist --action / close / import-handoff|log|punchlist)
-  export     the notes READ / export API (--last N | --session NNNN · --style json|human|both · --out)
-  migrate    opt-in convert ONE old 3-file markdown session → canonical JSON (--in / --out-dir)
-  boot-read  the boot-time pickup emit (prior handoff + open punchlist); never crashes boot
-  doctor     READ-ONLY health check: validate + hash-drift + suggest-migrate
+Notes-write verbs:
+  open · save · note · punchlist · import-handoff · import-log · import-punchlist
+  close      seal YOUR track (REFUSES unless a handoff AND a punchlist are both present);
+             with --track <other letter> --even-if-running, the abandoned seal of a dead instance's track
+  unseal     undo another instance's seal of a track (--session NNNN --track x); ask the person first
+
+Other verbs:
+  export · review · migrate · doctor · config · boot-read · compose
+  current    the current-session pointer + open gate (--state / --open / --seal / --next-number · --sessions-dir)
 ```
 
 You rarely type these yourself, but they're useful for scripting or inspection. For example, read back
@@ -461,9 +550,9 @@ Multiple `# ` blocks in one file is a batch, which is what `import` ingests.
 **The CLI underneath.** All mechanics run through `npx tpm task`, one unified usage:
 
 ```
-Usage: npx tpm task [--tasks-dir <path>] [--config <path>] <subcommand> [args]
+Usage: npx tpm task [--tasks-dir <path>] [--config <path>] [--session <ref> [--track <l>]] <subcommand> [args]
 Subcommands (via the router → tpm-task.js):
-  list [--state open|in-progress|finished|dropped|removed|all] [--label <l>]
+  list [--state open|in-progress|finished|dropped|removed|all] [--label <l>] [--session <ref> [--track <l>]]
   show <id>
   add --headline "<…>" [--summary "<…>"] [--context "<…>"] [--label <l>]… [--body-txt-file <f> --field summary|context]
   import <id> (--file <f.json> | stdin) [--prune]      # per-id JSON, editable fields only

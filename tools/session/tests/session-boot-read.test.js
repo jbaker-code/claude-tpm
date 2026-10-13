@@ -22,8 +22,11 @@ const { render } = require('../lib/session-converter');
 const br = require('../tpm-session-boot-read');
 const TOOL = path.join(__dirname, '..', 'tpm-session-boot-read.js');
 
-function runCli(args) {
-  const r = spawnSync(process.execPath, [TOOL, ...args], { encoding: 'utf8' });
+function runCli(args, extraEnv) {
+  // Ambient identity is stripped so the run is hermetic; extraEnv plays a specific Claude instance.
+  const env = Object.assign({}, process.env, extraEnv || {});
+  if (!extraEnv) { delete env.CLAUDE_CODE_SESSION_ID; delete env.CLAUDE_PID; }
+  const r = spawnSync(process.execPath, [TOOL, ...args], { encoding: 'utf8', env });
   return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
@@ -33,6 +36,7 @@ const NOW = '2026-09-21T10:00:00-07:00';
 function buildSession(sessionsDir, number, spec) {
   const s = spec || {};
   let rec = model.openSession({ number, sessionId: `sid-${number}`, tpmVersion: '0.2.0' });
+  if (s.sealed !== false) rec = model.closeSession(rec);   // a real PRIOR session is sealed (default)
   if (s.handoff) rec = model.importHandoff(rec, s.handoff);
   for (const item of s.open || []) rec = model.addPunchlist(rec, item);
   for (const item of s.closed || []) {
@@ -75,13 +79,10 @@ test('picks the HIGHEST prior and EXCLUDES the current (open-pointer) session', 
   const dir = tmpDir('br-select-');
   buildSession(dir, '0001', { handoff: { where: 'oldest', next: 'x' } });
   buildSession(dir, '0002', { handoff: { where: 'middle here', next: 'y' } });
-  buildSession(dir, '0003', { handoff: { where: 'current-open', next: 'z' } });
-  // Mark 0003 as the CURRENT open session via the pointer file the current-tool writes.
-  fs.writeFileSync(
-    path.join(dir, '.current-session.json'),
-    JSON.stringify({ sessionId: 'sid-0003', number: '0003', openedAt: NOW, closedAt: null }),
-  );
-  const r = runCli(['--sessions-dir', dir]);
+  // 0003 is the CURRENT session: an UNSEALED track owned by the caller's Claude session id (Q7: the
+  // exclusion comes from the tracks + the caller's id, no longer from the hint file).
+  buildSession(dir, '0003', { handoff: { where: 'current-open', next: 'z' }, sealed: false });
+  const r = runCli(['--sessions-dir', dir], { CLAUDE_CODE_SESSION_ID: 'sid-0003' });
   assert.strictEqual(r.code, 0);
   assert.ok(/PRIOR SESSION 0002/.test(r.stdout), 'emits 0002 (highest that is not the current open one)');
   assert.ok(/middle here/.test(r.stdout));
@@ -103,7 +104,10 @@ test('a corrupt prior JSON is SKIPPED, never crashes — exit 0', () => {
   fs.writeFileSync(path.join(folder, 'session-0005.json'), 'not json{');
   const r = runCli(['--sessions-dir', dir]);
   assert.strictEqual(r.code, 0, 'a corrupt prior must never crash boot');
-  assert.ok(/no prior session found/.test(r.stdout), 'the corrupt folder is skipped (invisible)');
+  assert.ok(/no prior session found/.test(r.stdout), 'the corrupt folder is skipped');
+  // Reader honesty (DoD H): the skipped record is LISTED and the output never claims "first session".
+  assert.ok(/1 record\(s\) could not be read and were skipped: 0005 \(corrupt\)/.test(r.stdout), r.stdout);
+  assert.ok(!/looks like the first session/.test(r.stdout), 'must NOT say "this looks like the first session" over a skipped record');
 });
 
 test('a corrupt HIGHER prior is skipped but a VALID lower one is still emitted, exit 0', () => {
@@ -115,12 +119,13 @@ test('a corrupt HIGHER prior is skipped but a VALID lower one is still emitted, 
   const r = runCli(['--sessions-dir', dir]);
   assert.strictEqual(r.code, 0);
   assert.ok(/PRIOR SESSION 0001/.test(r.stdout) && /valid lower/.test(r.stdout), 'falls through to the valid lower session');
+  assert.ok(/note: 1 newer record\(s\) were skipped \(unreadable\): 0009 \(corrupt\)/.test(r.stdout), 'the skipped record is listed');
 });
 
 test('--help exits 0', () => {
   const r = runCli(['--help']);
   assert.strictEqual(r.code, 0);
-  assert.ok(/ALWAYS exits 0/.test(r.stdout));
+  assert.ok(/Exits 0 for any VALID invocation/.test(r.stdout));
 });
 
 // ── module API ──────────────────────────────────────────────────────────────────
@@ -129,9 +134,12 @@ test('findPrior returns the highest loadable prior record, or null when none loa
   const dir = tmpDir('br-api-');
   buildSession(dir, '0001', { handoff: { where: 'w', next: 'n' } });
   const found = br.findPrior(dir, null);
-  assert.ok(found && found.number === '0001');
-  assert.strictEqual(found.record.handoff.where, 'w');
-  assert.strictEqual(br.findPrior(tmpDir('br-api-empty-'), null), null);
+  assert.ok(found.prior && found.prior.number === '0001');
+  assert.strictEqual(found.prior.record.handoff.where, 'w');
+  assert.deepStrictEqual(found.skipped, []);
+  const none = br.findPrior(tmpDir('br-api-empty-'), null);
+  assert.strictEqual(none.prior, null);
+  assert.deepStrictEqual(none.skipped, []);
 });
 
 done('session-boot-read.test');

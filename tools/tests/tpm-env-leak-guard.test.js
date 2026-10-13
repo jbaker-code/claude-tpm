@@ -27,7 +27,7 @@ const { mkScratch } = require('./lib/scratch');
 const { walk, BUNDLE } = require('./lib/guard-helpers');
 
 const TOOLS = path.join(BUNDLE, 'tools');
-const VARS = ['TPM_PROJECT_ROOT', 'TPM_HOME', 'CLAUDE_PROJECT_DIR'];
+const VARS = ['TPM_PROJECT_ROOT', 'TPM_HOME', 'CLAUDE_PROJECT_DIR', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID', 'TPM_SESSION_ID'];
 const SELF = path.relative(BUNDLE, __filename);
 
 let count = 0;

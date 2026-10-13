@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "session",
+  "meta": {
+    "number": "0021",
+    "sessionIds": [
+      "31569169-6609-4bcf-b90f-448f25ee98a3"
+    ],
+    "openedAt": "2026-09-19T07:36:00-07:00",
+    "closedAt": null,
+    "tpmVersion": "0.0.0",
+    "track": "a",
+    "claudeSessionId": "31569169-6609-4bcf-b90f-448f25ee98a3",
+    "claudePid": 4242,
+    "claudePidStartedAt": "2026-09-19T07:30:00-07:00",
+    "hostname": "dev-host",
+    "lastWriter": {
+      "version": "0.2.0-dev",
+      "at": "2026-09-19T13:36:00-07:00"
+    }
+  },
+  "handoff": {
+    "where": "Base lib promoted; session model + converter landing in the shared sandbox.",
+    "next": "Wire the converter into the export tool (P05).",
+    "in_flight": [
+      "P04 converter golden under review"
+    ],
+    "must_not_redo": [
+      "Re-deriving the payload nesting — it is LOCKED to top-level siblings.",
+      "Reading the clock inside render — now is injected."
+    ],
+    "updatedAt": "2026-09-19T13:36:00-07:00"
+  },
+  "log": [
+    {
+      "seq": 1,
+      "ts": "2026-09-19T07:36:00-07:00",
+      "type": "log",
+      "status": "NOTE",
+      "text": "Session 0021 opened; 20 prior sessions on disk."
+    },
+    {
+      "seq": 2,
+      "ts": "2026-09-19T08:05:00-07:00",
+      "type": "log",
+      "status": "NOTE",
+      "text": "Two separate sidecars decided:\ncompact current-config vs history (#1109)."
+    },
+    {
+      "seq": 3,
+      "ts": "2026-09-19T08:40:00-07:00",
+      "type": "decision",
+      "what": "JSON-first storage (#1112/#1113) is the foundation; per-ticket export ideas consolidated in, #1106/#1107 re-scoped to import-only.",
+      "why": "one versioned canonical JSON + derived human beats duplicated export logic per ticket."
+    },
+    {
+      "seq": 4,
+      "ts": "2026-09-19T09:14:00-07:00",
+      "type": "log",
+      "status": "NOTE",
+      "text": "punchlist reconciled, handoff rewritten."
+    }
+  ],
+  "punchlist": [
+    {
+      "id": "21.0",
+      "slug": "aa0000",
+      "text": "Lock the human-render format.",
+      "state": "done",
+      "createdAt": "2026-09-19T07:36:00-07:00",
+      "events": [
+        {
+          "ts": "2026-09-19T07:36:00-07:00",
+          "op": "add"
+        },
+        {
+          "ts": "2026-09-19T07:40:00-07:00",
+          "op": "close"
+        }
+      ]
+    },
+    {
+      "id": "21.1",
+      "slug": "bb0000",
+      "text": "Confirm run-all stays green after the converter suite lands.",
+      "state": "open",
+      "createdAt": "2026-09-19T07:36:00-07:00",
+      "events": [
+        {
+          "ts": "2026-09-19T07:36:00-07:00",
+          "op": "add"
+        }
+      ]
+    },
+    {
+      "id": "21.4",
+      "slug": "cc0000",
+      "text": "Legacy migration mapping (#1114) — spec only, not built.",
+      "state": "open",
+      "createdAt": "2026-09-19T07:36:00-07:00",
+      "events": [
+        {
+          "ts": "2026-09-19T07:36:00-07:00",
+          "op": "carry-in",
+          "fromSession": "0020"
+        }
+      ]
+    }
+  ]
+}

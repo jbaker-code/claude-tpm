@@ -227,6 +227,18 @@ function buildProse(cfg, mode, projectRoot, warnings) {
   return out;
 }
 
+/**
+ * pickupLead(pickupText) -> the line that introduces the pre-read pickup. Generated HERE in code (the template engine
+ * has no loop): when boot-read printed per-track blocks, several Claude instances ran in parallel, so say so and tell the
+ * reader to read every block and keep the tracks apart. A single-track pickup keeps the original lead word for word.
+ */
+function pickupLead(text) {
+  const blocks = (String(text).match(/^=== TRACK [a-z] ·/gm) || []).length;
+  if (!blocks) return 'Prior-session pickup (pre-read by the composer; read it fully):';
+  return `Prior-session pickup (pre-read by the composer; read it fully). SEVERAL Claude instances ran in parallel (${blocks} track block${blocks === 1 ? '' : 's'} below): ` +
+    'read EVERY block, keep the tracks apart, and reconcile them before acting. A track marked STILL LIVE or SEALED AS ABANDONED carries only its last-saved handoff.';
+}
+
 function runBootRead(sessionsDir, ctx) {
   const fallback = 'Prior-session pickup: run `tpm session boot-read` and read the handoff fully.';
   if (typeof ctx.pickup === 'string') return ctx.pickup;
@@ -235,12 +247,54 @@ function runBootRead(sessionsDir, ctx) {
     if (sessionsDir) args.push('--sessions-dir', sessionsDir);
     const r = spawnSync('node', args, { encoding: 'utf8', timeout: 15000, env: Object.assign({}, process.env, ctx.env || {}) });
     const out = (r.stdout || '').replace(/\n+$/, '');
-    if (r.status === 0 && out) return `Prior-session pickup (pre-read by the composer; read it fully):\n\n${out}`;
+    if (r.status === 0 && out) return `${pickupLead(out)}\n\n${out}`;
   } catch (_e) { /* fall through */ }
   return fallback;
 }
 
 // ── compose ──────────────────────────────────────────────────────────────────────────────────────────
+
+// The session state -> mode table for a bare invocation. EXPLICIT (no ternary): an unrecognised state string must
+// not silently become `open`. `foreign-open` = a session is open but none of its unsealed tracks is mine ->
+// the open gate (adopt / parallel / next / seal), NEVER save.
+const STATE_MODE = { open: 'save', 'not-opened': 'open', 'foreign-open': 'open' };
+
+const GATE_NOTICE = [
+  'Open gate: a session is open, but by ANOTHER Claude instance — none of its unsealed tracks is yours. Do NOT save or write to it.',
+  'Run `tpm session current --open`; it will refuse (exit 3) and print the other track(s) with evidence. Then ASK the person which it is — adopt (that track is mine, e.g. after /clear), parallel (I am a second train), next (open the next session), or seal-and-new (those tracks are dead: abandoned-seal them, then open the next session; show the evidence and get an explicit yes before passing --even-if-running) — and re-run with the matching flag. Never choose for them.',
+].join('\n');
+
+function foreignRefusal(mode) {
+  return [
+    `Cannot run \`tpm-session ${mode}\`: the session state is "foreign-open" — a session is open, but none of its unsealed tracks is yours.`,
+    `Writing now would put notes into a track you do not own. Nothing was written. Run \`tpm session compose --mode open\` (or the bare \`tpm-session\`) and follow the open gate: it shows the other track(s) and asks whether to adopt, run in parallel, or open the next session.`,
+  ].join('\n');
+}
+
+// True when the session has more than one track OR any foreign/other-owner/unowned track (the same
+// resolveCurrentSession signal that drives `foreign-open`). Fails OPEN (true): an unreadable state keeps the guidance.
+function hasMultiTrack(sessionsDirFor, warnings) {
+  try {
+    const { resolveCurrentSession } = require('./tpm-session-current');
+    const r = resolveCurrentSession({ sessionsDir: sessionsDirFor() });
+    return (Array.isArray(r.tracks) && r.tracks.length > 1) || r.state === 'foreign-open'
+      || (r.foreign || []).length > 0 || (r.unowned || []).length > 0;
+  } catch (e) {
+    warnings.push(`session-state-unreadable: ${e && e.message ? e.message : e}`);
+    return true;
+  }
+}
+
+function currentState(sessionsDirFor, warnings) {
+  try {
+    const { resolveCurrentSession } = require('./tpm-session-current');
+    return resolveCurrentSession({ sessionsDir: sessionsDirFor() }).state;
+  } catch (e) {
+    // Reader honesty: a resolver failure still defaults to open, but it is now VISIBLE.
+    warnings.push(`session-state-unreadable: ${e && e.message ? e.message : e}`);
+    return 'not-opened';
+  }
+}
 
 function composeInner(modeArg, ctx) {
   const tpl = ctx.engine || require('../lib/tpm-template');
@@ -267,6 +321,7 @@ function composeInner(modeArg, ctx) {
   const norm = normalizeMode(modeArg);
   let mode;
   let echo = '';
+  let gateNotice = '';
   if (norm.kind === 'reap') {
     return { text: `Reading "${norm.echo}" as a reap request: there is no \`tpm-session reap\` mode — run \`/tpm-reap\` directly.\n`,
       mode: null, kind: 'reap', warnings, emergency: false };
@@ -276,16 +331,23 @@ function composeInner(modeArg, ctx) {
       mode: null, kind: 'ambiguous', warnings, emergency: false };
   }
   if (norm.kind === 'auto') {
-    let state = 'not-opened';
-    try {
-      const { resolveCurrentSession } = require('./tpm-session-current');
-      state = resolveCurrentSession({ sessionsDir: sessionsDirFor() }).state;
-    } catch (_e) { /* default to open */ }
-    mode = state === 'open' ? 'save' : 'open';
-    echo = `Bare invocation → session state "${state}" → mode: ${mode}`;
+    const state = currentState(sessionsDirFor, warnings);
+    mode = STATE_MODE[state];
+    if (!mode) {
+      warnings.push(`session-state-unknown: "${state}" is not a state this composer knows; defaulting to open (the safe gate)`);
+      mode = 'open';
+    }
+    echo = `Bare invocation → session state "${state}" → mode: ${mode}${state === 'foreign-open' ? ' (open gate)' : ''}`;
+    if (state === 'foreign-open') gateNotice = GATE_NOTICE;
   } else {
     mode = norm.mode;
     echo = `Reading "${norm.echo}" as → mode: ${mode}`;
+    if (mode === 'save' || mode === 'close') {
+      // An explicit save/close in the third state is REFUSED with a pointer to open (never writes into a foreign track).
+      if (currentState(sessionsDirFor, warnings) === 'foreign-open') {
+        return { text: `${echo}\n\n${foreignRefusal(mode)}\n`, mode, kind: norm.kind, warnings, emergency: false, refused: true };
+      }
+    }
   }
 
   // 1. template source
@@ -305,6 +367,7 @@ function composeInner(modeArg, ctx) {
   const prose = PROSE_MODES.includes(mode) ? buildProse(cfg, mode, projectRoot, warnings)
     : { before: [], after: [], all: [] };
   const hasMarker = tpl.scanTemplate(template).injects.includes('prose');
+  const multi = mode === 'close' && hasMultiTrack(sessionsDirFor, warnings);
   const slots = {
     prose: hasMarker ? prose.all.join('\n\n') : '',
     'tools-common': fragment('_tools-common.md', warnings, templatesDir),
@@ -314,6 +377,9 @@ function composeInner(modeArg, ctx) {
     motd: mode === 'open' ? buildMotd(cfg) : '',
     additional: buildAdditional(cfg, mode, projectRoot, warnings),
     'reading-extras': mode === 'open' ? buildReadingExtras(cfg, projectRoot, warnings) : '',
+    // Multi-track seal / abandoned-seal / ETRACK_SEALED guidance: close only, and only when it can apply.
+    'multi-track': mode === 'close' && multi ? fragment('_close-multitrack.md', warnings, templatesDir) : '',
+    'foreign-gate': mode === 'close' && multi ? fragment('_close-foreign-gate.md', warnings, templatesDir) : '',
     pickup: '',
   };
   if (mode === 'open' && sess.enabled !== false && getFlag(cfg, 'session.notes.enabled') !== false) {
@@ -327,6 +393,7 @@ function composeInner(modeArg, ctx) {
   const parts = [];
   if (rc.degraded) parts.push(degradedBanner(rc.reason, rc.fallback).replace(/\n+$/, ''));
   if (echo) parts.push(echo);
+  if (gateNotice) parts.push(gateNotice);
   if (!hasMarker && prose.before.length) parts.push(prose.before.join('\n\n'));
   parts.push(r.text.replace(/\n+$/, ''));
   if (!hasMarker && prose.after.length) parts.push(prose.after.join('\n\n'));
@@ -359,7 +426,8 @@ function printHelp() {
     '',
     'Flags:',
     '  --mode <m>   Mode token (open|save|close|info, an alias such as start/wrap/checkpoint/status, a',
-    '               misspelling, or auto/empty = state-aware: not-opened -> open, open -> save).',
+    '               misspelling, or auto/empty = state-aware: not-opened -> open, open -> save,',
+    '               foreign-open (a session is open but none of its tracks is yours) -> open, the gate).',
     '               Extra words after the mode token are accepted and ignored.',
     '  --help       Show this message.',
     '',
@@ -386,4 +454,4 @@ if (require.main === module) {
   process.exit(main(process.argv));
 }
 
-module.exports = { compose, normalizeMode, EMERGENCY_BOOT, degradedBanner, MODES, ALIASES, TEMPLATES_DIR, main };
+module.exports = { compose, pickupLead, normalizeMode, STATE_MODE, EMERGENCY_BOOT, degradedBanner, MODES, ALIASES, TEMPLATES_DIR, main };

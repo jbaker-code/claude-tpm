@@ -39,6 +39,9 @@ const path = require('path');
 
 const { loadSession } = require('./lib/session-model');
 const { render } = require('./lib/session-converter');
+const T = require('./lib/session-tracks');
+const ids = require('./lib/session-ids');
+const collate = require('./lib/session-collate');
 const { selectRecords, combine, dispatch } = require('../lib/export-scaffold');
 const { nowIsoTz } = require('../lib/timestamp');
 
@@ -88,93 +91,181 @@ function padNumber(number) {
 }
 
 /**
- * resolveRecords(opts) -> record[]  (the records to export, in export order)
+ * sessionNumbers(sessionsDir) -> ['0001', ...] ascending: every session folder holding at least one TRACK record
+ * (a, or only b..z). `--last N` counts these (sessions), never track files.
+ */
+function sessionNumbers(sessionsDir) {
+  if (!sessionsDir) throw new Error('enumerateSessions: sessionsDir is required');
+  try {
+    fs.readdirSync(sessionsDir);
+  } catch (e) {
+    throw new Error(`tpm-session-export: cannot read --sessions-dir '${sessionsDir}': ${e.message}`);
+  }
+  return T.listSessionNumbers(sessionsDir).filter((n) => T.listFolder(sessionsDir, n).tracks.length > 0);
+}
+
+const nameForRecord = (record) => {
+  const t = record && record.meta && typeof record.meta.track === 'string' && /^[b-z]$/.test(record.meta.track) ? `-${record.meta.track}` : '';
+  return `session-${padNumber(record && record.meta && record.meta.number)}${t}`;
+};
+
+/**
+ * resolveUnits(opts) -> { units, notes }   (the sessions to export, in export order)
+ * A UNIT is one session: { number, name, collation|null, records:[readable track records, a..z] }.
  *
  * The search-composition SEAM (export-spec: compose with #1092, do NOT re-match). Three ways in,
  * in precedence order:
- *   1. opts.records   — a PRE-LOADED result-set (the truest #1092 seam): used verbatim.
- *   2. opts.selector  — an explicit id/selector LIST of session numbers (a #1092-style result-set,
- *                       stubbed: we take the list, we do not compute it). Resolved against the dir
- *                       in the ORDER given; a number may be padded ('0021') or bare ('21').
- *   3. opts.last (N)  — the N most-recent sessions (highest numbers), emitted NEWEST-FIRST.
- * An optional `opts.filter` (a predicate fn OR an array result-set) then COMPOSES over the
- * candidates via the scaffold's `selectRecords` — again, no re-matching here.
+ *   1. opts.records   — a PRE-LOADED result-set (the truest #1092 seam): used verbatim, one unit per record.
+ *   2. opts.selector  — an explicit id/selector LIST of session numbers, resolved in the ORDER given; a number may
+ *                       be padded ('0021') or bare ('21'). A session expands to its tracks a..z.
+ *   3. opts.last (N)  — the N most-recent SESSIONS (highest numbers), NEWEST-FIRST, each expanded to its tracks.
+ * `opts.track` (a letter or a >=8-char Claude session id prefix) narrows every selected session to that track;
+ * a session lacking it is skipped with a note, and when NO selected session has it the lookup is an error.
+ * An optional `opts.filter` (a predicate fn OR an array result-set) then COMPOSES over the candidate records.
  */
-function resolveRecords(opts) {
+function resolveUnits(opts) {
   const options = opts || {};
-  const load = typeof options.loadSession === 'function' ? options.loadSession : loadSession;
-  let records;
+  const load = typeof options.loadSession === 'function' ? options.loadSession : null;
+  const notes = [];
+  let units;
 
   if (Array.isArray(options.records)) {
-    records = options.records.slice();
-  } else if (Array.isArray(options.selector) && options.selector.length) {
-    const byNumber = new Map(enumerateSessions(options.sessionsDir).map((e) => [e.number, e]));
-    records = options.selector.map((sel) => {
-      const num = Number(sel);
-      const entry = Number.isFinite(num) ? byNumber.get(num) : undefined;
-      if (!entry) {
-        throw new Error(`tpm-session-export: selector '${sel}' matched no session-<NNNN>.json in '${options.sessionsDir}'`);
-      }
-      return load(entry.path);
-    });
-  } else if (options.last != null) {
-    const n = Number(options.last);
-    if (!Number.isInteger(n) || n < 1) {
-      throw new Error(`tpm-session-export: --last must be a positive integer, got ${JSON.stringify(options.last)}`);
-    }
-    const entries = enumerateSessions(options.sessionsDir);
-    const chosen = entries.slice(-n).reverse(); // top-N highest, NEWEST-FIRST
-    records = chosen.map((e) => load(e.path));
+    units = options.records.map((record) => ({
+      number: padNumber(record && record.meta && record.meta.number), name: nameForRecord(record), collation: null, records: [record],
+    }));
   } else {
-    throw new Error('tpm-session-export: nothing to export — pass records, --session <NNNN>… (selector), or --last N');
+    let numbers;
+    if (Array.isArray(options.selector) && options.selector.length) {
+      const have = new Set(sessionNumbers(options.sessionsDir).map(Number));
+      numbers = options.selector.map((sel) => {
+        T.assertSessionNumber(sel);
+        const num = Number(sel);
+        if (!Number.isFinite(num) || !have.has(num)) {
+          throw new Error(`tpm-session-export: selector '${sel}' matched no session-<NNNN>.json in '${options.sessionsDir}'`);
+        }
+        return padNumber(num);
+      });
+    } else if (options.last != null) {
+      const n = Number(options.last);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error(`tpm-session-export: --last must be a positive integer, got ${JSON.stringify(options.last)}`);
+      }
+      numbers = sessionNumbers(options.sessionsDir).slice(-n).reverse(); // top-N highest, NEWEST-FIRST
+    } else {
+      throw new Error('tpm-session-export: nothing to export — pass records, --session <NNNN>… (selector), or --last N');
+    }
+    units = [];
+    let firstMissing = null;
+    for (const num of numbers) {
+      let col;
+      try {
+        col = collate.collateSession(options.sessionsDir, num, { track: options.track });
+      } catch (e) {
+        if (options.track && e && (e.code === 'ENO_TRACK')) {
+          if (!firstMissing) firstMissing = e;
+          if (numbers.length > 1) notes.push(`note: session ${num} has no track ${options.track}; skipped`);
+          continue;
+        }
+        throw e;
+      }
+      if (load) {
+        for (const ts of col.tracks) {
+          if (!ts.files.json) continue;
+          try { ts.record = load(ts.jsonPath); ts.readable = true; } catch (e) { ts.record = null; ts.readable = false; ts.message = String(e.message); }
+        }
+      }
+      if (!col.multi && col.tracks.length === 1 && !col.tracks[0].readable) {
+        // a lone track a that cannot be read fails loudly, exactly as before (never an empty export)
+        throw new Error(col.tracks[0].message || `cannot read track ${col.tracks[0].track} of session ${col.number}`);
+      }
+      const records = col.tracks.filter((t) => t.readable).map((t) => t.record);
+      for (const t of col.tracks) {
+        if (t.readable) continue;
+        if (!col.multi && !col.narrowed) continue;                 // a lone unreadable track a fails loudly at render, as before
+        notes.push(`note: track ${t.track} of ${col.number} is unreadable (${collate.unreadableReason(t)}); not exported`);
+      }
+      const narrowedLetter = col.narrowed && col.narrowed !== 'a' ? `-${col.narrowed}` : '';
+      units.push({ number: col.number, name: `session-${col.number}${narrowedLetter}`, collation: col, records });
+    }
+    if (!units.length && firstMissing) throw firstMissing;
   }
 
   if (options.filter !== undefined && options.filter !== null) {
-    records = selectRecords(records, { filter: options.filter });
+    const all = [].concat(...units.map((u) => u.records));
+    const keep = new Set(selectRecords(all, { filter: options.filter }));
+    units = units.map((u) => {
+      const records = u.records.filter((r) => keep.has(r));
+      const collation = u.collation ? Object.assign({}, u.collation, { tracks: u.collation.tracks.filter((t) => !t.readable || keep.has(t.record)) }) : null;
+      return Object.assign({}, u, { records, collation });
+    }).filter((u) => u.records.length);
   }
-  if (!records.length) throw new Error('tpm-session-export: the selection resolved to zero sessions');
-  return records;
+  if (!units.length) throw new Error('tpm-session-export: the selection resolved to zero sessions');
+  return { units, notes };
+}
+
+/** resolveRecords(opts) -> record[] — the flat record list of resolveUnits (a..z within each session). */
+function resolveRecords(opts) {
+  return [].concat(...resolveUnits(opts).units.map((u) => u.records));
 }
 
 // ── the export core ──────────────────────────────────────────────────────────
 
 /**
- * exportSessions(opts) -> { records, outputs, written }
+ * exportSessions(opts) -> { records, outputs, written, notes }
  *
- *   opts.sessionsDir  — dir of `session-<NNNN>.json` (required unless opts.records given).
+ *   opts.sessionsDir  — dir of per-session folders session-<NNNN>/ (required unless opts.records given).
  *   opts.records      — OPTIONAL pre-loaded result-set (bypasses enumeration; the #1092 seam).
  *   opts.selector     — OPTIONAL explicit list of session numbers (the #1092-style seam).
- *   opts.last         — OPTIONAL N most-recent (highest numbers), newest-first.
+ *   opts.last         — OPTIONAL N most-recent SESSIONS (highest numbers), newest-first.
+ *   opts.track        — OPTIONAL narrow every selected session to one track (letter or Claude session id prefix).
  *   opts.filter       — OPTIONAL predicate fn OR array result-set, composed via selectRecords.
  *   opts.styles       — ['json'] | ['human'] | ['json','human']  (default ['json']).
  *   opts.combine      — 'one-file' | 'per-file' (default 'one-file' for multi; moot for a single).
  *   opts.out          — dir (write each file) OR a single file path; omitted -> nothing written.
  *   opts.now          — reference time for punchlist age (ISO string / Date); default nowIsoTz().
  *   opts.render       — injected converter (default session-converter.render).
- *   opts.loadSession  — injected loader (default session-model.loadSession).
+ *   opts.loadSession  — injected loader (default: the track-state loader).
  *
- * Returns the resolved `records`, the `outputs` ([{ style, suggestedName, body, path|null }]),
- * and whether files were `written`. `now` is bound ONCE in a closure so the human converter is
- * always called `converter(record)` with age available (P04 concern).
+ * A session with several tracks is ONE human unit (the merged read: title + table, every track's section, the
+ * combined open punchlist) and one JSON record per track (a bare array when more than one record is exported).
+ * File names: `session-NNNN` for track a, `session-NNNN-x` for b..z. Returns the resolved `records` (flat, a..z per
+ * session), the `outputs` ([{ style, suggestedName, body, path|null }]), whether files were `written`, and the
+ * stderr `notes` a caller should print (marker-sealed tracks read from JSON, unreadable tracks skipped, ...).
+ * `now` is bound ONCE in a closure so the human converter always has an age reference (P04 concern).
  */
 function exportSessions(opts) {
   const options = opts || {};
   const styles = normalizeStyles(options.styles);
   const renderFn = typeof options.render === 'function' ? options.render : render;
   const now = options.now != null ? options.now : nowIsoTz();
-  const converter = (record) => renderFn(record, { now }); // ← the `now` CLOSURE (P04 concern)
 
-  const records = resolveRecords(options);
+  const { units, notes } = resolveUnits(options);
+  const records = [].concat(...units.map((u) => u.records));
   const mode = options.combine || (records.length > 1 ? 'one-file' : 'per-file');
+  const unitCount = units.length;
   const combinedName = options.combinedName ||
-    (options.last != null ? `sessions-last-${records.length}` : 'sessions-combined');
-  const nameFor = (record) => `session-${padNumber(record && record.meta && record.meta.number)}`;
+    (options.last != null ? `sessions-last-${unitCount}` : 'sessions-combined');
+
+  // stderr notes for what a reader of the JSON/human output must know about marker-sealed tracks
+  for (const u of units) {
+    if (!u.collation) continue;
+    for (const ts of u.collation.tracks) {
+      if (!ts.readable || ts.sealedBy !== 'marker') continue;
+      if (styles.includes('json')) notes.push(collate.jsonMarkerNote(ts));
+      else if (!u.collation.multi) notes.push(collate.humanMarkerNote(ts));
+    }
+  }
 
   const outputs = [];
   for (const style of styles) {
-    const groups = combine(records, { mode });
+    const groups = style === 'human' ? combine(units, { mode }) : combine(records, { mode });
     for (const group of groups) {
-      const descriptors = dispatch(group, { style, converter, nameFor, combinedName });
+      const descriptors = style === 'human'
+        ? dispatch(group, {
+          style, combinedName, nameFor: (u) => u.name,
+          converter: (u) => (u.collation ? collate.renderSessionHuman(u.collation, { now, render: renderFn }) : renderFn(u.records[0], { now })),
+        })
+        : dispatch(group, { style, nameFor: nameForRecord, combinedName });
       for (const d of descriptors) outputs.push({ style, suggestedName: d.suggestedName, body: d.body, path: null });
     }
   }
@@ -184,7 +275,7 @@ function exportSessions(opts) {
     writeOutputs(outputs, options.out);
     written = true;
   }
-  return { records, outputs, written };
+  return { records, outputs, written, notes };
 }
 
 // ['json','human'] normalized/deduped; accepts a string, comma-list, 'both', or array.
@@ -246,7 +337,8 @@ function parseArgv(argv) {
     switch (a) {
       case '--sessions-dir': opts.sessionsDir = next(); break;
       case '--last': opts.last = next(); break;
-      case '--session': for (const v of next().split(',')) if (v.trim()) opts.selector.push(v.trim()); break;
+      case '--track': opts.track = next(); break;
+      case '--session': { const raw = next(); T.assertSessionNumber(raw); for (const v of raw.split(',')) if (v.trim()) opts.selector.push(v.trim()); break; }
       case '--style': for (const v of next().split(',')) if (v.trim()) opts.styles.push(v.trim()); break;
       case '--combine': opts.combine = next(); break;
       case '--out': opts.out = next(); break;
@@ -265,8 +357,13 @@ const USAGE = `tpm-session-export — session export tool (run: tpm session expo
   --sessions-dir <dir>     directory of session-<NNNN>.json (a SCRATCH or real dir). OPTIONAL (F4):
                            omitted → resolved from the LOCAL project's .claude/claude-tpm/config.json
                            (session.notes.sessionsDir); the flag OVERRIDES; with NEITHER, FAILS LOUD.
-  --last N                 export the N most-recent sessions (newest first)
-  --session <NNNN>[,NNNN]  explicit selector list (repeatable; the #1092 seam) — no re-matching
+  --last N                 export the N most-recent sessions (newest first; a session with several tracks counts once)
+  --track <letter|id>      narrow to ONE track: a letter a-z, or at least 8 characters of its owner's Claude session
+                           id. An unknown value is an error, never an empty result. Without it, a session with
+                           several tracks prints ALL of them (human: one merged read with a table and the combined
+                           open punchlist; json: one record per track, a bare array when more than one).
+  --session <NNNN>[,NNNN]  explicit selector list (repeatable; the #1092 seam) — no re-matching. A number only:
+                           '0001b' is rejected (pick the track with --track b)
   --style json|human|both  output format(s); repeatable / comma-list (default: json)
   --combine one-file|per-file   multi-session: ONE combined file (default) or per-session files
   --out <dir|file>         write here (dir = per suggestedName; file = single output). Omit -> stdout.
@@ -280,6 +377,10 @@ function main(argv) {
   try {
     opts = parseArgv(argv);
   } catch (e) {
+    if (e && e.code === 'ESESSION_DESIGNATOR') {
+      process.stderr.write(`tpm-session-export: ${e.message}\n`);
+      return e.exitCode || 2;
+    }
     process.stderr.write(String(e.message) + '\n\n' + USAGE + '\n');
     return 2;
   }
@@ -290,7 +391,8 @@ function main(argv) {
     if (!opts.sessionsDir && !opts.records) {
       opts.sessionsDir = require('./tpm-session-config').resolveSessionsDir(undefined, undefined).sessionsDir;
     }
-    const { outputs, written } = exportSessions(opts);
+    const { outputs, written, notes } = exportSessions(opts);
+    for (const n of notes) process.stderr.write(`${n}\n`);
     if (!written) {
       // stdout: single output raw; multiple outputs delimited by a name banner.
       if (outputs.length === 1) {
@@ -304,7 +406,7 @@ function main(argv) {
     return 0;
   } catch (e) {
     process.stderr.write('tpm-session-export: ' + String(e.message) + '\n');
-    return 1;
+    return e && (e.code === 'ETRACK_SELECTOR' || e.code === 'ESESSION_DESIGNATOR') ? e.exitCode : 1;
   }
 }
 
@@ -312,6 +414,8 @@ module.exports = {
   exportSessions,
   resolveRecords,
   enumerateSessions,
+  resolveUnits,
+  sessionNumbers,
   normalizeStyles,
   padNumber,
   main,

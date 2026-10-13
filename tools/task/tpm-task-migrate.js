@@ -408,7 +408,7 @@ function runMigration(opts) {
   if (o.emitDerived) {
     for (const r of records) {
       const md = model.bodyPathFor(outDir, r.id).replace(/\.json$/, '.md');
-      fs.writeFileSync(md, converter.render(r.record, { now }));
+      base.io.atomicWriteFileSync(md, converter.render(r.record, { now }));   // atomic like every other store write (#1173)
       mdPaths.push(md);
     }
     model.writeIndexViews(outDir, index, converter.renderIndexView);

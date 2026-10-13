@@ -131,7 +131,7 @@ tools/task/
   tpm-task-config.js / .md       the `tasks` config-section resolver (the #1109 history gate)
   tpm-task-router.js / .md       the `tpm task` sub-router (forwards to the tools above)
   tpm-task-migrate.js / .md      opt-in whole-store old-markdown→JSON migrator (#1114.B); exports detectStore
-  tpm-task-doctor.js / .md       READ-ONLY validator: schema · hash-drift · label-index · old-format detect (#1119)
+  tpm-task-doctor.js / .md       READ-ONLY validator: schema · hash-drift · label-index · old-format detect (#1119) · lock health · id health · lastWriter flag
   lib/
     base.js                      the ONE indirection → the shared base lib at the sibling tools/lib/ via ../../lib (#1121)
     # kind:"task" — the only kind-specific modules
@@ -141,10 +141,10 @@ tools/task/
     legacy-task-format.js        the copied lenient old-markdown parser (parseBody/parseIndex) the migrator reuses; NOT a shared lib
   tests/
     run-all.js                   forks one process per *.test.js; exits nonzero on any failure
-    *.test.js                    16 suites (base-load · task-schema · task-model · task-converter · tpm-task-ops ·
+    *.test.js                    23 suites incl. the store-lock trio task-lock · task-lock-interleave · task-lock-forced (base-load · task-schema · task-model · task-converter · tpm-task-ops ·
                                  tpm-task-export · integration-e2e · dogfood-corpus · ops-persist-fault · exit-code ·
                                  metadata · task-migrate · task-doctor · task-hard-remove · task-router-doctor-migrate ·
-                                 index-now-golden)
+                                 index-now-golden; the list is abridged - the directory glob is the truth)
     fixtures/legacy-tasks/       clean / refuse-no-created / refuse-partial old-store fixtures (migrate + doctor tests)
     golden/                      task-1119.fixture.json + .expected.md (byte-exact body render) ·
                                  tasks-index.fixture.json + task-index.expected.md (byte-exact index-view render)

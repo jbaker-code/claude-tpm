@@ -75,4 +75,87 @@ function readCanonicalSync(filePath) {
   }
 }
 
-module.exports = { atomicWriteFileSync, readCanonicalSync };
+/**
+ * exclusiveCreateFileSync(finalPath, data, { encoding = 'utf8' }) -> 'created' | 'exists'
+ *
+ * EXCLUSIVE create with a COMPLETE file: writes `data` to a temp in the SAME directory, fsyncs it, then
+ * `fs.linkSync(tmp, finalPath)` — a hard link fails with EEXIST when `finalPath` exists, so exactly one
+ * racing creator wins, and the winner's file is never visible partially written. NOT `wx`: a
+ * `wx`-created file is EMPTY until its writer writes, and on the shared mount another process can read
+ * it empty for ~1 s (phase-06 claim-probe). `rename` is not exclusive (it replaces).
+ *
+ * Fallback: when the filesystem has no hard links (ENOTSUP/EPERM/ENOSYS/EOPNOTSUPP/EXDEV) it uses
+ * `wx` + write + fsync (non-atomic visibility) and says so once on stderr; readers apply a
+ * young-empty re-read rule in that mode.
+ *
+ * The prepared temp is `.<basename>.claim.<pid>.<rand>.tmp` (leading dot, trailing .tmp) in the target's dir.
+ */
+let warnedNoHardLinks = false;
+function exclusiveCreateFileSync(finalPath, data, opts) {
+  const encoding = (opts && opts.encoding) || 'utf8';
+  const dir = path.dirname(finalPath);
+  const base = path.basename(finalPath);
+  const rand = Math.random().toString(36).slice(2);
+  const tmp = path.join(dir, `.${base}.claim.${process.pid}.${rand}.tmp`);
+  const cleanup = () => { try { fs.unlinkSync(tmp); } catch (_) { /* best-effort */ } };
+
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w');
+    fs.writeSync(fd, data, null, encoding);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+  } catch (err) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch (_) { /* best-effort */ } }
+    cleanup();
+    const e = new Error(`exclusiveCreateFileSync: failed preparing '${finalPath}': ${err.message}`);
+    e.cause = err;
+    e.code = err.code;
+    throw e;
+  }
+
+  try {
+    fs.linkSync(tmp, finalPath);
+    cleanup();
+    return 'created';
+  } catch (err) {
+    if (err && err.code === 'EEXIST') { cleanup(); return 'exists'; }
+    if (err && ['ENOTSUP', 'EPERM', 'ENOSYS', 'EOPNOTSUPP', 'EXDEV'].includes(err.code)) {
+      try {
+        if (!warnedNoHardLinks) {
+          warnedNoHardLinks = true;
+          process.stderr.write('tpm: warning: filesystem has no hard links; exclusive create fell back to a non-atomic-visibility mode\n');
+        }
+        let wfd;
+        try {
+          wfd = fs.openSync(finalPath, 'wx');
+        } catch (e2) {
+          if (e2 && e2.code === 'EEXIST') { cleanup(); return 'exists'; }
+          throw e2;
+        }
+        try {
+          fs.writeSync(wfd, data, null, encoding);
+          fs.fsyncSync(wfd);
+        } finally {
+          fs.closeSync(wfd);
+        }
+        cleanup();
+        return 'created';
+      } catch (e3) {
+        cleanup();
+        const e = new Error(`exclusiveCreateFileSync: failed creating '${finalPath}': ${e3.message}`);
+        e.cause = e3;
+        e.code = e3.code;
+        throw e;
+      }
+    }
+    cleanup();
+    const e = new Error(`exclusiveCreateFileSync: failed creating '${finalPath}': ${err.message}`);
+    e.cause = err;
+    e.code = err.code;
+    throw e;
+  }
+}
+
+module.exports = { atomicWriteFileSync, readCanonicalSync, exclusiveCreateFileSync };

@@ -1,0 +1,1 @@
+**If `tpm session current --state` reports `foreign-open`** (a session is open, but none of its unsealed tracks is yours), REFUSE: say "a session is open by another Claude instance; nothing was closed", write nothing, and run `tpm session compose --mode open` to reach the open gate — you cannot close or note into a track you do not own.

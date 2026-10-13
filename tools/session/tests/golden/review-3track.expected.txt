@@ -1,0 +1,91 @@
+# Session 0001 · 3 parallel tracks
+
+| track | state | owner | opened | last write |
+|---|---|---|---|---|
+| a | sealed (closed) | aaaaaaaa | <TS> | <TS> |
+| b | sealed (abandoned) | bbbbbbbb | <TS> | <TS> |
+| c | live | cccccccc | <TS> | <TS> |
+
+
+# Session 0001 · <DATE> · track a
+
+> _Generated from `session-0001.json` — do not hand-edit; regenerated and overwritten on every save._
+> _Change it via `tpm session` ops or import (`#1115`). · session 0001 · **closed** · schema 1.0.0 · id aaaaaaaa…aaaa (generated from: <H>)_
+
+## Handoff
+
+**Where we are:**
+work of track a
+
+**Next:**
+next of track a
+
+## Punchlist
+
+**Open (1)**
+1. `#1a.2` fix flaky retry test _(<AGE>)_
+
+**Done (1)**
+- ~~`#1a.1` wire the config loader~~ _(closed <T>)_
+
+## Log
+_Newest first._
+
+_No log entries yet._
+
+
+# Session 0001 · <DATE> · track b
+
+> _Generated from `session-0001-b.json` — do not hand-edit; regenerated and overwritten on every save._
+> _Change it via `tpm session` ops or import (`#1115`). · session 0001 · **sealed by marker (abandoned)** · schema 1.0.0 · id bbbbbbbb…bbbb (generated from: <H>)_
+
+## Handoff
+
+**Where we are:**
+work of track b
+
+**Next:**
+next of track b
+
+## Punchlist
+
+**Open (2)**
+1. `#1b.1` port the exporter _(<AGE>)_
+2. `#1b.2` write exporter docs _(<AGE>)_
+
+## Log
+_Newest first._
+
+_No log entries yet._
+
+
+# Session 0001 · <DATE> · track c
+
+> _Generated from `session-0001-c.json` — do not hand-edit; regenerated and overwritten on every save._
+> _Change it via `tpm session` ops or import (`#1115`). · session 0001 · **open** · schema 1.0.0 · id cccccccc…cccc (generated from: <H>)_
+
+## Handoff
+
+**Where we are:**
+work of track c
+
+**Next:**
+next of track c
+
+## Punchlist
+
+**Open (1)**
+1. `#1c.1` benchmark the lock _(<AGE>)_
+
+## Log
+_Newest first._
+
+_No log entries yet._
+
+
+## Open punchlist, all tracks (4)
+
+1. `#1a.2` [track a] fix flaky retry test
+2. `#1b.1` [track b] port the exporter
+3. `#1b.2` [track b] write exporter docs
+4. `#1c.1` [track c] benchmark the lock

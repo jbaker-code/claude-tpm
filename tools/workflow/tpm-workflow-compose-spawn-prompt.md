@@ -40,6 +40,23 @@ orchestrator fills it. That is the intended poka-yoke loop between the two tools
 
 ---
 
+## Session attribution (the `tpm-session` comment)
+
+Right after the `<!-- tpm-workflow-spawn … -->` marker, compose emits a SEPARATE comment naming the tpm session that composed
+the prompt (never an attribute of the marker itself, whose format the doctor and the spawn gate match strictly):
+
+```
+You are a BUILDER subagent.
+<!-- tpm-workflow-spawn phase="dev/e/01-x" role="builder" -->
+<!-- tpm-session session="session-0012b" via="lookup" -->
+```
+
+Resolution is the shared resolver's order: `--session`/`--track` flag (`via="flag"`), then `TPM_SESSION_ID` (`"env"`), then a
+lookup of `CLAUDE_CODE_SESSION_ID` against the session tracks (`TPM_SESSIONS_DIR` or the project's sessions folder; `"lookup"`),
+then blank. When nothing resolves the comment line is omitted entirely, and a failure to resolve never blocks the compose.
+`--session 12 --track c` gives `<!-- tpm-session session="session-0012c" via="flag" -->`; a malformed or disagreeing flag
+(`--session zz`) exits `2`. Verified by composing against a scratch sessions folder with a fake Claude id.
+
 ## Role-conditional posture (read-order cue + return-shape)
 
 `compose` keys both the read-order line-1 cue AND the return-shape off `--role`, so a composed
@@ -106,6 +123,7 @@ The four required flags have no defaults — omit one and it fails loudly with e
 | `--plan <file>` | ✅ | Plan filename inside the phase dir (e.g. `plan.md`). |
 | `--charter <file>` | ✅ | Charter filename inside the phase dir. |
 | `--verdict <path>` | ✅ for `--role bug-fixer` | The verifier verdict file the fixer's scope IS. It becomes **read-order item 1** (*"the findings you fix are EXACTLY these"*), making the verify→fix handoff a named artifact instead of freeform `{{TASK_CONTEXT}}` prose. **Mandatory** when `--role bug-fixer` (omitting it → exit 2); ignored for other roles. |
+| `--session <ref>` / `--track <letter>` | | Stamp this tpm session in the `tpm-session` comment instead of resolving one (see "Session attribution"). `0012`, `0012b`, `12b`, `session-0012b`; malformed or disagreeing exits `2`. |
 | `--round <N>` | | Round number → `r<N>` in the identity slug (scratch folder + verifier verdict filename). |
 | `--variant <M>` | | Verifier variant → `v<M>`; only meaningful alongside `--round`. |
 | `--model <name>` | | Named in a trailing `(Model for this spawn: … )` note. The Agent call still sets it. |

@@ -42,7 +42,12 @@ const path = require('path');
 const model = require('./lib/session-model');
 const { render } = require('./lib/session-converter');
 const { nowIsoTz } = require('../lib/timestamp');
+const { readIdentity } = require('../lib/identity');
+const { tpmVersion } = require('../lib/tpm-version');
 const sessionConfig = require('./tpm-session-config');
+const T = require('./lib/session-tracks');
+const ids = require('./lib/session-ids');
+const { withSessionLock } = require('./lib/session-lock');
 
 // ── paths ────────────────────────────────────────────────────────────────────
 
@@ -53,65 +58,167 @@ function padNumber(number) {
 }
 
 /**
- * sessionPaths(sessionsDir, number) -> { jsonPath, mdPath }
+ * sessionPaths(sessionsDir, number, track = 'a') -> { jsonPath, mdPath, sealedPath, folder, track }
  * CANONICAL NESTED layout (json-format-spec A4, Q-F): each session lives in its OWN per-session
- * folder `<sessionsDir>/session-<NNNN>/`, holding session-<NNNN>.json (canonical) + session-<NNNN>.md
- * (derived). Zero-padded <NNNN>. The enclosing folder is created (mkdir -p) by `persist` before write.
+ * folder `<sessionsDir>/session-<NNNN>/`. Track a is `session-<NNNN>.json` (+ `.md` derived) — the
+ * pre-tracks name; tracks b..z are `session-<NNNN>-<x>.json`. The 2-arg form is track a. The enclosing
+ * folder is created (mkdir -p) by `persist` before write.
  */
-function sessionPaths(sessionsDir, number) {
+function sessionPaths(sessionsDir, number, track) {
   if (!sessionsDir) throw new Error('tpm-session-ops: sessionsDir is required');
   if (number === undefined || number === null || String(number) === '') {
     throw new Error('tpm-session-ops: session number is required');
   }
-  const nnnn = padNumber(number);
-  const sessionDir = path.join(sessionsDir, `session-${nnnn}`);
-  return {
-    jsonPath: path.join(sessionDir, `session-${nnnn}.json`),
-    mdPath: path.join(sessionDir, `session-${nnnn}.md`),
-  };
+  const p = T.trackPaths(sessionsDir, padNumber(number), track);
+  return { jsonPath: p.jsonPath, mdPath: p.mdPath, sealedPath: p.sealedPath, folder: p.folder, track: p.track };
+}
+
+// ── the mutate seam (Q11: every mutating verb runs under the shared session lock) ─────────────
+/**
+ * Every mutating op runs its WHOLE read-modify-write (own-track resolution → load → mutate → persist → hint)
+ * through here, under the per-session-folder lock (lib/session-lock.js). Files and stdin the op needs are read
+ * BEFORE it (a gather step), the lock is never held for anything else, and it is released on a throw.
+ */
+function mutate(o, verb, fn) { return withSessionLock(o && o.sessionsDir, o && o.number, verb, fn); }
+// Late-bound through module.exports so a test can spy on the seam.
+function runMutating(o, verb, fn) { return module.exports.mutate(o, verb, fn); }
+
+/**
+ * ownTrack(o) -> letter — THE function that answers "which track is mine" for a write. One call per write verb, as
+ * the first statement of its locked body, so a programmatic caller gets the same ownership protection as the CLI.
+ * An explicit `o.track` is honoured after an ownership check (ENOT_OWNER); with none, the caller's Claude session
+ * id picks its own track (see T.resolveWriteTrack for the ladder).
+ */
+function ownTrack(o) {
+  return T.resolveWriteTrack({
+    sessionsDir: o.sessionsDir, number: o.number, track: o.track,
+    identity: o.identity || readIdentity({ withStartTime: false }),
+  }).track;
 }
 
 /**
- * persist(record, { sessionsDir, number, now, renderFn }) -> record (the persisted record)
+ * touchOwner(record, identity, readFull) -> record   (evidence only — never changes WHO owns the track)
+ * Called by persist on every save. Adds meta.track when absent (a legacy record gains it on its first
+ * save, which ends its supersession-by-age). When the caller IS the owner (or the record has no owner id)
+ * and the process id differs from the recorded one, refreshes claudePid / claudePidStartedAt / hostname
+ * (a `claude --resume` keeps the session id but starts a new process). A null owner is filled with the
+ * caller's id; a non-null owner is NEVER replaced (that is adopt, a later phase).
+ */
+function touchOwner(record, track, identity, readFull) {
+  const meta = record && record.meta;
+  if (!meta || typeof meta !== 'object') return record;
+  if (meta.track === undefined) meta.track = track;
+  const callerId = identity && identity.claudeSessionId ? identity.claudeSessionId : null;
+  if (!callerId) return record;
+  const owner = T.ownerOf(meta);
+  if (owner.claudeSessionId !== null && owner.claudeSessionId !== callerId) return record;
+  const needsId = meta.claudeSessionId !== callerId;
+  const pidDiffers = identity.claudePid !== null && identity.claudePid !== undefined && identity.claudePid !== meta.claudePid;
+  if (needsId) meta.claudeSessionId = callerId;
+  if (pidDiffers) {
+    const full = typeof readFull === 'function' ? readFull() : identity;
+    meta.claudePid = full.claudePid === undefined ? null : full.claudePid;
+    meta.claudePidStartedAt = full.claudePidStartedAt === undefined ? null : full.claudePidStartedAt;
+    meta.hostname = full.hostname === undefined ? null : full.hostname;
+  }
+  return record;
+}
+
+/**
+ * persist(record, { sessionsDir, number, track = 'a', now, renderFn, lastWriterVersion, identity }) -> record
  * The single save path shared by every op: writes the canonical JSON ATOMICALLY first, THEN
  * regenerates the derived `.md` via the converter with `now` bound in a CLOSURE (P04/P06 concern).
+ * Stamps meta.lastWriter {version, at} (the B2 mixed-version stamp) and refreshes owner evidence.
  */
 function persist(record, opts) {
   const { sessionsDir, number, now } = opts;
+  const track = opts.track || 'a';
   const renderFn = typeof opts.renderFn === 'function' ? opts.renderFn : render;
   const ref = now != null ? now : nowIsoTz();
-  const { jsonPath, mdPath } = sessionPaths(sessionsDir, number);
+  const { jsonPath, mdPath, sealedPath } = sessionPaths(sessionsDir, number, track);
+  // Narrow the load-to-write window: a marker created after our load still refuses the write (DoD D).
+  if (fs.existsSync(sealedPath)) T.assertWritable(T.trackState(sessionsDir, padNumber(number), track));
   fs.mkdirSync(path.dirname(jsonPath), { recursive: true }); // the per-session folder session-<NNNN>/
-  return model.saveSession(record, {
+  const identity = opts.identity || readIdentity({ withStartTime: false });
+  const next = JSON.parse(JSON.stringify(record));
+  touchOwner(next, track, identity, () => (opts.identity || readIdentity({ withStartTime: true })));
+  const version = opts.lastWriterVersion !== undefined ? opts.lastWriterVersion : tpmVersion();
+  return model.saveSession(next, {
     jsonPath,
     mdPath,
     render: (r) => renderFn(r, { now: ref }),   // ← the `now` CLOSURE
+    lastWriter: { version },
   });
 }
 
-// Load the current canonical record for a session (fail-loud via the model's load path).
-function loadCurrent(sessionsDir, number) {
-  const { jsonPath } = sessionPaths(sessionsDir, number);
+// Load the current canonical record for a session track (fail-loud via the model's load path).
+function loadCurrent(sessionsDir, number, track) {
+  const { jsonPath } = sessionPaths(sessionsDir, number, track);
   return model.loadSession(jsonPath);
+}
+
+// The load every WRITE op starts from: a track sealed by someone else's marker refuses (ETRACK_SEALED, naming
+// who sealed it and when). The ONE "is it sealed" answer is T.trackState; a track the owner closed itself is
+// not guarded (Q-C7).
+function loadForWrite(sessionsDir, number, track) {
+  T.assertWritable(T.trackState(sessionsDir, padNumber(number), track || 'a'));
+  return loadCurrent(sessionsDir, number, track);
+}
+
+// Pass-through of the per-op options persist needs.
+function pOpts(o, track) {
+  return { sessionsDir: o.sessionsDir, number: o.number, track, now: o.now, renderFn: o.renderFn, identity: o.identity };
+}
+
+// Gather step: files are read BEFORE the lock is taken; a read error is kept and thrown inside the body at the
+// point the old code threw it, so the order of errors a caller sees does not change.
+function preRead(file) {
+  try { return { text: readFileText(file) }; } catch (e) { return { error: e }; }
+}
+function takePre(pre) {
+  if (pre.error) throw pre.error;
+  return pre.text;
 }
 
 // ── OPS ───────────────────────────────────────────────────────────────────────
 
 /**
- * opOpen({ sessionsDir, number, sessionId, tpmVersion?, priorSessionPath?, now? }) -> record
- * Mint a fresh session and persist it. A prior session's still-open punchlist items are carried
- * forward (same slug, new id, {op:"carry-in", fromSession:<prior number>} event).
+ * opOpen({ sessionsDir, number, track?, sessionId, tpmVersion?, priorSessionPath?, now?, identity? }) -> record
+ * Mint a fresh session track and persist it — EXCLUSIVELY: the record is created with a link-from-temp claim,
+ * so an existing record is NEVER overwritten. If the target already exists and belongs to this session id
+ * (or either side has no id) it is returned unchanged ("record exists; nothing done"); if it belongs to a
+ * different session id -> ESESSION_EXISTS. A prior session's still-open punchlist items are carried forward
+ * (same slug, new id, {op:"carry-in", fromSession}) only when the record is newly created.
  */
 function opOpen(opts) {
   const o = opts || {};
-  const record = model.openSession({
-    number: o.number,
-    sessionId: o.sessionId,
-    tpmVersion: o.tpmVersion,
-    priorSessionPath: o.priorSessionPath,
-    priorSession: o.priorSession,
-  });
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  if (!o.number) throw new Error('openSession: `number` is required');
+  if (!o.sessionId) throw new Error('openSession: `sessionId` is required');
+  const track = o.track || 'a';
+  const nnnn = padNumber(o.number);
+  const ident = Object.assign({}, o.identity || readIdentity({ withStartTime: true }), { claudeSessionId: o.sessionId });
+  const lwv = tpmVersion();
+  let claimed;
+  try {
+    claimed = T.claimTrack(o.sessionsDir, nnnn, {
+      letters: [track], now: o.now, renderFn: o.renderFn, lastWriterVersion: lwv,
+      makeRecord: (letter) => model.openTrack({
+        number: o.number, track: letter, identity: ident, tpmVersion: o.tpmVersion, lastWriterVersion: lwv,
+        priorSessionPath: o.priorSessionPath, priorSession: o.priorSession,
+      }),
+    });
+  } catch (err) {
+    if (!(err && err.code === 'ETRACK_EXISTS')) throw err;
+    const existing = loadCurrent(o.sessionsDir, nnnn, track);
+    const ownerId = T.ownerOf(existing.meta).claudeSessionId;
+    if (ownerId !== null && ownerId !== o.sessionId) {
+      throw new T.TrackError('ESESSION_EXISTS',
+        `track ${track} of ${nnnn} already exists and belongs to another session; use \`tpm session current --open\``);
+    }
+    process.stderr.write('tpm-session-ops open: record exists; nothing done\n');
+    return existing;
+  }
+  return claimed.record;
 }
 
 /**
@@ -120,8 +227,11 @@ function opOpen(opts) {
  */
 function opSave(opts) {
   const o = opts || {};
-  const record = loadCurrent(o.sessionsDir, o.number);
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return runMutating(o, 'save', () => {
+    const track = ownTrack(o);
+    const record = loadForWrite(o.sessionsDir, o.number, track);
+    return persist(record, pOpts(o, track));
+  });
 }
 
 /**
@@ -131,11 +241,14 @@ function opSave(opts) {
  */
 function opNote(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.sessionsDir, o.number);
-  record = model.appendLog(record, {
-    type: o.type, what: o.what, why: o.why, status: o.status, text: o.text,
+  return runMutating(o, 'note', () => {
+    const track = ownTrack(o);
+    let record = loadForWrite(o.sessionsDir, o.number, track);
+    record = model.appendLog(record, {
+      type: o.type, what: o.what, why: o.why, status: o.status, text: o.text,
+    });
+    return persist(record, pOpts(o, track));
   });
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
 }
 
 /**
@@ -149,7 +262,38 @@ function opNote(opts) {
  */
 function opPunchlist(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.sessionsDir, o.number);
+  // gather: the prior session file of a carry-in is read before the lock
+  let prior = null;
+  if (o.action === 'carry-in' && o.priorSessionPath) {
+    try { prior = { record: model.loadSession(o.priorSessionPath) }; } catch (e) { prior = { error: e }; }
+  }
+  return runMutating(o, 'punchlist', () => opPunchlistBody(o, prior));
+}
+
+/**
+ * assertOwnItem(o, track, record) — close/reopen/drop change ONLY items on the caller's own track. An item that is
+ * not in `record` but belongs to another track is refused BY NAME (ECROSS_TRACK) before anything is written; a true
+ * miss falls through to the model's own "no item matching" error, byte for byte.
+ */
+function assertOwnItem(o, track, record) {
+  if (model.findItem(record, o.idOrSlug)) return;
+  const hit = T.locateItem(o.sessionsDir, padNumber(o.number), o.idOrSlug, { exceptTrack: track });
+  if (!hit) return;
+  const nnnn = padNumber(o.number);
+  const verb = o.action;
+  const ownerId = hit.state.owner && hit.state.owner.claudeSessionId;
+  const stateText = hit.state.sealedBy === 'marker' ? 'sealed by marker' : hit.state.state === 'sealed' ? 'sealed (closed)' : hit.state.state;
+  const shown = ids.displayItemId(hit.item.id, true);
+  throw new T.TrackError('ECROSS_TRACK',
+    `item #${shown} [${hit.item.slug}] belongs to track ${hit.track} of session ${nnnn} (owner ${ownerId ? `${String(ownerId).slice(0, 8)}...` : 'unowned'}, ${stateText}), not to your track ${track}. `
+    + `Nothing was changed. Each track changes only its own items; ask that instance to ${verb} it.`,
+    { number: nnnn, item: { id: hit.item.id, slug: hit.item.slug }, ownerTrack: hit.track, mineTrack: track, ownerState: stateText });
+}
+
+function opPunchlistBody(o, prior) {
+  const track = ownTrack(o);
+  let record = loadForWrite(o.sessionsDir, o.number, track);
+  if (o.action === 'close' || o.action === 'reopen' || o.action === 'drop') assertOwnItem(o, track, record);
   switch (o.action) {
     case 'add':
       record = model.addPunchlist(record, { text: o.text, slug: o.slug });
@@ -166,17 +310,18 @@ function opPunchlist(opts) {
     case 'carry-in': {
       if (!o.priorSessionPath) throw new Error('punchlist carry-in: --from <prior session json> is required');
       if (!o.item) throw new Error('punchlist carry-in: --item <id|slug> is required');
-      const prior = model.loadSession(o.priorSessionPath);
-      const src = (prior.punchlist || []).find((it) => it.id === o.item || it.slug === o.item);
+      if (prior.error) throw prior.error;
+      const priorRecord = prior.record;
+      const src = model.findItem(priorRecord, o.item);
       if (!src) throw new Error(`punchlist carry-in: no item matching '${o.item}' in '${o.priorSessionPath}'`);
       if (src.state !== 'open') throw new Error(`punchlist carry-in: item '${o.item}' is '${src.state}', only OPEN items carry in`);
-      record = model.carryInPunchlist(record, src, prior.meta && prior.meta.number);
+      record = model.carryInPunchlist(record, src, ids.fromSessionLabel(priorRecord.meta));
       break;
     }
     default:
       throw new Error(`punchlist: unknown action '${o.action}' (add|close|reopen|drop|carry-in)`);
   }
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return persist(record, pOpts(o, track));
 }
 
 /**
@@ -186,10 +331,55 @@ function opPunchlist(opts) {
  */
 function opClose(opts) {
   const o = opts || {};
-  const record = loadCurrent(o.sessionsDir, o.number);
-  assertCloseGuard(record);
-  const closed = model.closeSession(record);
-  return persist(closed, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return runMutating(o, 'close', () => {
+    const track = ownTrack(o);
+    const record = loadForWrite(o.sessionsDir, o.number, track);
+    assertCloseGuard(record);
+    const closed = model.closeSession(record);
+    const saved = persist(closed, pOpts(o, track));
+    // Keep the hint TRUE (closed iff no track is still unsealed) — only when a hint already exists, so
+    // closing a record never creates files in a store that has none.
+    try { T.writeHint(o.sessionsDir, { ifPresent: true }); } catch (_e) { /* hint is advisory */ }
+    return saved;
+  });
+}
+
+
+/**
+ * opSealAbandoned({ sessionsDir, number, track, identity?, reason?, note?, confirm?, now? }) -> { plan, sealed, already, marker }
+ * `close --track <other instance's letter>`: the deliberate ABANDONED SEAL of a foreign track (marker file;
+ * the record is never opened for write, no close guard, no handoff fabricated). `confirm` is the
+ * `--even-if-running` flag and is ALWAYS required - without it nothing is written and the plan is returned.
+ */
+function opSealAbandoned(opts) {
+  const o = opts || {};
+  if (!o.number) throw new T.TrackError('ETRACK_ARG', 'sealing another track needs --session <NNNN>');
+  return runMutating(o, 'seal-abandoned', () => T.sealByMarker(o.sessionsDir, padNumber(o.number), o.track, {
+    by: o.identity || readIdentity({ withStartTime: true }), reason: 'abandoned', note: o.reason === undefined ? null : o.reason,
+    confirm: Boolean(o.confirm), now: o.now,
+  }));
+}
+
+/** opUnseal({ sessionsDir, number, track, now? }) -> { number, track, unsealed, already, auditPath } */
+function opUnseal(opts) {
+  const o = opts || {};
+  if (!o.number) throw new T.TrackError('ETRACK_ARG', 'unseal needs --session <NNNN>');
+  if (!o.track) throw new T.TrackError('ETRACK_ARG', 'unseal needs --track <letter>');
+  return runMutating(o, 'unseal', () => T.unsealTrack(o.sessionsDir, padNumber(o.number), o.track, { now: o.now }));
+}
+
+/** formatSealPlan([plan]) -> the evidence block shown before any abandoned seal (also used by --seal-and-new). */
+function formatSealPlan(plans) {
+  return plans.map((p) => `  track ${p.track} of ${p.number}   ${p.state === 'unreadable' ? `unreadable record (${p.unreadable})` : 'live'}   owner ${p.owner.claudeSessionId ? String(p.owner.claudeSessionId).slice(0, 8) : 'unknown'}${p.owner.claudePid ? ` (pid ${p.owner.claudePid}${p.owner.hostname ? ` on ${p.owner.hostname}` : ''})` : ''}   last write ${p.lastWriteAt || 'unknown'}   ${p.livenessLine}`).join('\n');
+}
+
+/** True when `--track` names a track whose recorded owner is a DIFFERENT Claude session than the caller. */
+function isForeignTrack(sessionsDir, number, track, identity) {
+  const callerId = identity && identity.claudeSessionId ? identity.claudeSessionId : null;
+  if (!callerId || !T.isTrackLetter(track)) return false;
+  const st = T.trackState(sessionsDir, padNumber(number), track);
+  const ownerId = st && st.owner ? st.owner.claudeSessionId : null;
+  return Boolean(ownerId && ownerId !== callerId);
 }
 
 /**
@@ -234,7 +424,18 @@ function readFileText(file) {
  */
 function opImportHandoff(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.sessionsDir, o.number);
+  // gather: every source file is read before the lock (errors are deferred to where the old code threw them)
+  const pre = {
+    json: o.jsonFile ? preRead(o.jsonFile) : null,
+    txt: o.txtFile ? preRead(o.txtFile) : null,
+    nextFile: o.next == null && o.nextFile ? preRead(o.nextFile) : null,
+  };
+  return runMutating(o, 'import-handoff', () => opImportHandoffBody(o, pre));
+}
+
+function opImportHandoffBody(o, pre) {
+  const track = ownTrack(o);
+  let record = loadForWrite(o.sessionsDir, o.number, track);
   let handoffObj;
 
   if (o.jsonFile && o.txtFile) {
@@ -243,7 +444,7 @@ function opImportHandoff(opts) {
   if (o.jsonFile) {
     let parsed;
     try {
-      parsed = JSON.parse(readFileText(o.jsonFile));
+      parsed = JSON.parse(takePre(pre.json));
     } catch (e) {
       throw new Error(`import-handoff: '${o.jsonFile}' is not valid JSON: ${e.message}`);
     }
@@ -255,8 +456,8 @@ function opImportHandoff(opts) {
       throw new Error(`import-handoff: '${o.jsonFile}' has no handoff object`);
     }
   } else if (o.txtFile) {
-    const where = readFileText(o.txtFile).replace(/\s+$/, '');   // trim trailing whitespace/newline
-    const next = o.next != null ? o.next : (o.nextFile ? readFileText(o.nextFile).replace(/\s+$/, '') : undefined);
+    const where = takePre(pre.txt).replace(/\s+$/, '');   // trim trailing whitespace/newline
+    const next = o.next != null ? o.next : (o.nextFile ? takePre(pre.nextFile).replace(/\s+$/, '') : undefined);
     if (!next || String(next).trim() === '') {
       throw new Error(
         'import-handoff --txt-file: handoff replace also needs a non-empty `next` — pass --next <str> ' +
@@ -271,7 +472,7 @@ function opImportHandoff(opts) {
   }
 
   record = model.importHandoff(record, handoffObj);   // REPLACE; editable-only; re-stamps updatedAt
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return persist(record, pOpts(o, track));
 }
 
 /**
@@ -282,8 +483,14 @@ function opImportHandoff(opts) {
  */
 function opImportLog(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.sessionsDir, o.number);
-  const body = readFileText(o.txtFile).replace(/\s+$/, '');
+  const pre = preRead(o.txtFile);
+  return runMutating(o, 'import-log', () => opImportLogBody(o, pre));
+}
+
+function opImportLogBody(o, pre) {
+  const track = ownTrack(o);
+  let record = loadForWrite(o.sessionsDir, o.number, track);
+  const body = takePre(pre).replace(/\s+$/, '');
   if (body === '') throw new Error(`import-log: '${o.txtFile}' is empty — nothing to append`);
   let entry;
   if (o.type === 'decision') {
@@ -293,7 +500,7 @@ function opImportLog(opts) {
     entry = { type: 'log', status: o.status || 'NOTE', text: body };
   }
   record = model.importLogAddendum(record, [entry]);
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return persist(record, pOpts(o, track));
 }
 
 /**
@@ -303,11 +510,17 @@ function opImportLog(opts) {
  */
 function opImportPunchlist(opts) {
   const o = opts || {};
-  let record = loadCurrent(o.sessionsDir, o.number);
-  const items = parsePunchlistItems(readFileText(o.file), o.file);
+  const pre = preRead(o.file);
+  return runMutating(o, 'import-punchlist', () => opImportPunchlistBody(o, pre));
+}
+
+function opImportPunchlistBody(o, pre) {
+  const track = ownTrack(o);
+  let record = loadForWrite(o.sessionsDir, o.number, track);
+  const items = parsePunchlistItems(takePre(pre), o.file);
   if (!items.length) throw new Error(`import-punchlist: '${o.file}' yielded no items`);
   record = model.importPunchlist(record, items);
-  return persist(record, { sessionsDir: o.sessionsDir, number: o.number, now: o.now, renderFn: o.renderFn });
+  return persist(record, pOpts(o, track));
 }
 
 // Parse punchlist items from raw file contents: JSON array first, else one-item-per-line text.
@@ -342,9 +555,12 @@ function parseArgv(argv) {
       case '--sessions-dir': o.sessionsDir = next(); break;
       case '--session': case '--number': o.number = next(); break;
       case '--session-id': o.sessionId = next(); break;
+      case '--track': o.track = next(); break;
       case '--tpm-version': o.tpmVersion = next(); break;
       case '--prior-session-path': case '--from': o.priorSessionPath = next(); break;
       case '--now': o.now = next(); break;
+      case '--reason': o.reason = next(); break;
+      case '--even-if-running': case '--confirm': o.confirm = true; break;
       // note
       case '--decision': case '--decide': o.type = 'decision'; break;
       case '--log': o.type = 'log'; break;
@@ -383,6 +599,8 @@ Common:  --sessions-dir <dir>   store dir holding per-session folders session-<N
                                 dir; created for open). OPTIONAL (F4): omitted → resolved from the LOCAL
                                 project's .claude/claude-tpm/config.json (session.notes.sessionsDir); the
                                 flag OVERRIDES; with NEITHER it FAILS LOUD (never defaults to a live store).
+         --track <letter>       OPTIONAL: the track to act on (a letter a-z only; a session designator like 0001b is rejected). By default a write verb acts on YOUR track,
+                                resolved from your Claude session id; a track owned by another session is refused.
          --session <NNNN>       session number (aka --number). ALWAYS 4-digit zero-padded: --session 1 is
                                 normalized to 0001, so the folder (session-0001/) and stored meta.number agree.
          --now <iso>            reference time for punchlist age (default: now, local offset)
@@ -394,9 +612,17 @@ Verbs:
   note          --session <NNNN> (--log --status NOTE --text "…" | --decision --what "…" --why "…")
   punchlist     --session <NNNN> --action add|close|reopen|drop|carry-in
                     add:      --text "…" [--slug s]
-                    close/reopen/drop: --item <id|slug>
+                    close/reopen/drop: --item <id|slug>   (an id is accepted as 123.4 or 123a.4; only items on YOUR
+                                       track can be changed - another track's item is refused, naming its owner)
                     carry-in: --from <prior json> --item <id|slug>
-  close         --session <NNNN>       (REFUSES unless a handoff AND a punchlist are present)
+  close         --session <NNNN>       (REFUSES unless a handoff AND a punchlist are present; seals ONLY your own track)
+  close         --session <NNNN> --track <other instance's letter> [--reason "…"] --even-if-running
+                    The ABANDONED SEAL of a track another Claude instance owns (a dead train). Writes a seal marker
+                    file; the record is untouched, the close guard is skipped, NO handoff is written for it. Without
+                    --even-if-running (alias --confirm) it only prints what would be sealed (track, last write, liveness)
+                    and exits 4. Show the person that evidence and get an explicit yes first.
+  unseal        --session <NNNN> --track <letter>    undo another instance's seal of YOUR track (renames the marker to
+                    a hidden audit file); the person decides - ask first
 
 Import (#1115) — --txt-file and --file are ALIASES; every import verb accepts BOTH spellings (#2 smoke):
   import-handoff   --session <NNNN> (--json-file <f> | (--txt-file|--file) <f> --next "…"|--next-file <f>
@@ -421,18 +647,27 @@ function openPunchlistCount(record) {
   return pl.filter((it) => it && it.state === 'open').length;
 }
 
+// The display form of an id (Q8): a track-a id of a multi-track session prints as "123a.4"; otherwise as stored.
+function isMultiTrackSession(opts) {
+  try {
+    if (!opts || !opts.sessionsDir || opts.number === undefined || opts.number === null) return false;
+    return ids.sessionIsMulti(T.listFolder(opts.sessionsDir, padNumber(opts.number)));
+  } catch (_e) { return false; }
+}
+
 function describePunchlist(opts, record) {
   const pl = record && Array.isArray(record.punchlist) ? record.punchlist : [];
   const action = opts.action;
+  const multi = isMultiTrackSession(opts);
   if (action === 'add' || action === 'carry-in') {
     const it = pl[pl.length - 1];
     const verbWord = action === 'add' ? 'added' : 'carried in';
-    return it ? `${verbWord} #${it.id} [${it.slug}]` : `${verbWord} an item`;
+    return it ? `${verbWord} #${ids.displayItemId(it.id, multi)} [${it.slug}]` : `${verbWord} an item`;
   }
   const key = opts.idOrSlug;
-  const it = pl.find((i) => i.id === key || i.slug === key);
+  const it = model.findItem({ punchlist: pl }, key);
   const verbWord = action === 'close' ? 'closed' : action === 'reopen' ? 'reopened' : 'dropped';
-  return it ? `${verbWord} #${it.id} [${it.slug}]` : `${verbWord} '${key}'`;
+  return it ? `${verbWord} #${ids.displayItemId(it.id, multi)} [${it.slug}]` : `${verbWord} '${key}'`;
 }
 
 /** describeResult(verb, opts, record) -> a one-line STATE-TRANSITION summary for stderr (F1). */
@@ -495,6 +730,7 @@ function dispatch(verb, opts) {
     case 'note': return opNote(opts);
     case 'punchlist': return opPunchlist(opts);
     case 'close': return opClose(opts);
+    case 'unseal': return opUnseal(opts);
     case 'import-handoff': return opImportHandoff(opts);
     case 'import-log': return opImportLog(opts);
     case 'import-punchlist': return opImportPunchlist(opts);
@@ -515,6 +751,13 @@ function main(argv) {
     return 2;
   }
   if (parsed.opts.help) { process.stdout.write(USAGE + '\n'); return 0; }
+  try {
+    T.assertSessionNumber(parsed.opts.number);   // '0001b' is not a session number: the track is --track b
+  } catch (e) {
+    process.stderr.write(`${prefixOnce('tpm-session-ops: ', e.message)}\n`);
+    process.stdout.write(`${JSON.stringify({ refused: true, code: e.code, message: e.message, details: null }, null, 2)}\n`);
+    return e.exitCode || 2;
+  }
   // #3 (smoke): normalize --session ONCE at the arg boundary to the canonical 4-digit form, so the
   // on-disk folder (session-NNNN/) and the stored meta.number always AGREE (`--session 1` ⇒ 0001).
   // Invalid input is left untouched to fail loud downstream (the model's canonicalNumber rejects it).
@@ -528,16 +771,50 @@ function main(argv) {
     if (!parsed.opts.sessionsDir) {
       parsed.opts.sessionsDir = sessionConfig.resolveSessionsDir(undefined, undefined).sessionsDir;
     }
+    // `unseal`: the documented way back after another instance sealed a track (renames the seal marker).
+    if (parsed.verb === 'unseal') {
+      const r = opUnseal(parsed.opts);
+      process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+      process.stderr.write(r.unsealed
+        ? `tpm-session-ops unseal: track ${r.track} of ${r.number} un-sealed (marker kept as ${path.basename(r.auditPath)})\n`
+        : `tpm-session-ops unseal: track ${r.track} of ${r.number} has no seal marker; nothing to do\n`);
+      return 0;
+    }
+    const callerIdent = readIdentity({ withStartTime: false });
+    const abandoned = parsed.verb === 'close' && parsed.opts.number != null && String(parsed.opts.number).trim() !== ''
+      && parsed.opts.track && isForeignTrack(parsed.opts.sessionsDir, parsed.opts.number, parsed.opts.track, callerIdent);
+    if (abandoned) {
+      // Sealing ANOTHER instance's track: the abandoned seal. Always needs --even-if-running (alias --confirm).
+      const r = opSealAbandoned(Object.assign({}, parsed.opts, { identity: readIdentity({ withStartTime: true }) }));
+      process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+      if (!r.sealed) {
+        process.stderr.write(`${formatSealPlan([r.plan])}\nNOTHING was sealed. Show this to the person; only on an explicit yes re-run with --even-if-running.\n`);
+        return 4;
+      }
+      process.stderr.write(r.already
+        ? `tpm-session-ops close: track ${r.plan.track} of ${r.plan.number} was already sealed; nothing written\n`
+        : `tpm-session-ops close: track ${r.plan.track} of ${r.plan.number} sealed as abandoned (no handoff was written for it; recorded in ${path.basename(T.trackPaths(parsed.opts.sessionsDir, r.plan.number, r.plan.track).sealedPath)})\n`);
+      return 0;
+    }
+    if (parsed.opts.confirm || parsed.opts.reason !== undefined) {
+      throw new T.TrackError('ETRACK_ARG', '--even-if-running / --reason only apply to `close --session N --track <another instance\'s letter>` (the abandoned seal). Nothing was written.');
+    }
+    // Write verbs act on MY track: each op resolves it itself (ownTrack, inside its lock), so --track passes through
+    // untouched here. `open` claims the requested/first one.
     const record = dispatch(parsed.verb, parsed.opts);
     // F1: report the STATE TRANSITION (not the identical two paths). Paths move behind --verbose.
     process.stderr.write(`tpm-session-ops ${parsed.verb}: ${describeResult(parsed.verb, parsed.opts, record)}\n`);
     if (parsed.opts.verbose) {
-      const { jsonPath, mdPath } = sessionPaths(parsed.opts.sessionsDir, record.meta.number);
+      const { jsonPath, mdPath } = sessionPaths(parsed.opts.sessionsDir, record.meta.number, (record.meta && record.meta.track) || parsed.opts.track);
       process.stderr.write(`  wrote ${jsonPath}\n  wrote ${mdPath}\n`);
     }
     return 0;
   } catch (e) {
     process.stderr.write(prefixOnce('tpm-session-ops: ', e && e.message ? e.message : e) + '\n');
+    if (e instanceof T.TrackError) {
+      process.stdout.write(`${JSON.stringify({ refused: true, code: e.code, message: e.message, details: e.details || null }, null, 2)}\n`);
+      return e.exitCode;
+    }
     return 1;
   }
 }
@@ -548,8 +825,8 @@ module.exports = {
   // import
   opImportHandoff, opImportLog, opImportPunchlist,
   // guard + helpers (exported for tests)
-  assertCloseGuard, sessionPaths, padNumber, parsePunchlistItems, persist,
-  describeResult, prefixOnce,
+  assertCloseGuard, sessionPaths, padNumber, parsePunchlistItems, persist, mutate, ownTrack, touchOwner,
+  describeResult, prefixOnce, formatSealPlan, opSealAbandoned, opUnseal,
   main,
 };
 

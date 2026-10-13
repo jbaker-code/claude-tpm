@@ -23,13 +23,13 @@ const router = require('../tpm-session-router');
 const run = (args) => spawnSync('node', [ROUTER, ...args], { encoding: 'utf8' });
 
 // ── structural: the verb table was flattened ────────────────────────────────────────
-test('VERBS no longer has `ops`; the eight ops sub-verbs are promoted to top-level', () => {
+test('VERBS no longer has `ops`; the ops sub-verbs (incl. unseal) are promoted to top-level', () => {
   assert.ok(!('ops' in router.VERBS), 'the `ops` grouping verb is gone from the table');
-  for (const v of ['open', 'save', 'note', 'punchlist', 'close', 'import-handoff', 'import-log', 'import-punchlist']) {
+  for (const v of ['open', 'save', 'note', 'punchlist', 'close', 'unseal', 'import-handoff', 'import-log', 'import-punchlist']) {
     assert.strictEqual(router.VERBS[v], 'tpm-session-ops.js', `${v} maps to the ops tool`);
     assert.ok(router.OPS_VERBS.has(v), `${v} is in OPS_VERBS (gets its verb re-injected)`);
   }
-  assert.strictEqual(router.OPS_VERBS.size, 8, 'exactly eight promoted ops sub-verbs');
+  assert.strictEqual(router.OPS_VERBS.size, 9, 'exactly nine promoted ops sub-verbs (eight + unseal)');
 });
 
 // ── functional: a promoted verb dispatches to the ops tool end-to-end ────────────────

@@ -20,6 +20,24 @@ const { NOW, scratch, jsonPath, mdPath, writeTmp, fs } = require('./helpers/e2e-
 
 const ops = require('../tpm-session-ops');
 
+// Phase 12 (Q11): every mutating op now takes the session lock, and the lock itself renames its prepared directory
+// into place. This fault must strike the RECORD write (what this file is about), not the lock's own rename, so the
+// stub passes any rename that touches a `.lock*` path through to the real fs.
+function withFailingRecordRename(fn) {
+  const real = fs.renameSync;
+  fs.renameSync = function failingStub(from, to) {
+    if (/[\\/]\.lock(?:\.|$|[\\/])/.test(String(from)) || /[\\/]\.lock(?:\.|$|[\\/])/.test(String(to))) return real.apply(this, arguments);
+    const e = new Error('injected fs.renameSync failure');
+    e.code = 'EIO';
+    throw e;
+  };
+  try { return fn(); } finally { fs.renameSync = real; }
+}
+
+function lockResidue(dir) {
+  return fs.readdirSync(dir, { recursive: true }).filter((f) => /(^|[\\/])\.lock/.test(String(f)));
+}
+
 function tmpFiles(dir) { return fs.readdirSync(dir).filter((f) => f.endsWith('.tmp')); }
 
 // Seed a valid, populated session (handoff + a log entry + a punchlist item) via the ops.
@@ -37,7 +55,7 @@ test('opNote under a forced RENAME fault: canonical JSON byte-unchanged, .md unc
   const mdBefore = fs.readFileSync(mdPath(dir, 21), 'utf8');
 
   let threw = false;
-  withFailingFs('renameSync', () => {
+  withFailingRecordRename(() => {
     try {
       ops.opNote({ sessionsDir: dir, number: '0021', type: 'log', status: 'NOTE', text: 'this must not land', now: NOW });
     } catch (e) {
@@ -51,6 +69,7 @@ test('opNote under a forced RENAME fault: canonical JSON byte-unchanged, .md unc
   assert.ok(jsonBefore.indexOf('this must not land') === -1, 'sanity: the aborted note never reached the pre-existing JSON');
   assert.strictEqual(fs.readFileSync(mdPath(dir, 21), 'utf8'), mdBefore, 'derived .md unchanged (JSON write fails FIRST, before md regen)');
   assert.deepStrictEqual(tmpFiles(dir), [], 'no orphaned .tmp left behind');
+  assert.deepStrictEqual(lockResidue(dir), [], 'the session lock was RELEASED on the throw (no .lock left behind)');
 });
 
 test('opPunchlist under a forced FSYNC fault: canonical JSON byte-unchanged, no orphan tmp, loud throw', () => {

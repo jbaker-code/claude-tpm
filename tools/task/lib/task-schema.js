@@ -240,6 +240,8 @@ function validatePayload(payloadOrRecord, record) {
   }
 
   // ── history (mechanical, append-only audit; default []; config-gated) ──
+  // Events MAY also carry optional `session` (e.g. 'session-0012b') + `sessionVia` ('flag'|'env'|'lookup') keys
+  // (attribution). They are deliberately NOT validated: a hand-edited value must never make a record unreadable.
   if (rec.history !== undefined && rec.history !== null) {
     if (!Array.isArray(rec.history)) {
       throw new Error(`validatePayload: history must be an array, got ${JSON.stringify(rec.history)}`);

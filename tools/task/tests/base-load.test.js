@@ -13,10 +13,11 @@ const { assert, test, done } = require('./helpers/task-e2e-helpers');
 
 const base = require('../lib/base');
 
-// The 10 base modules the phase-02 seam promises (01-plan §3 / §5, 02 HANDOFF).
+// The 10 base modules the phase-02 seam promises (01-plan §3 / §5, 02 HANDOFF) + lock/identity (multi-session phase 04) + attribution (phase 17).
 const EXPECTED_MODULES = [
   'io', 'envelope', 'version', 'validate', 'update',
   'normalize', 'timestamp', 'exportScaffold', 'hash', 'paths',
+  'lock', 'identity', 'attribution',   // multi-session support (phase 04): the shared directory lock + identity reader
 ];
 
 // A representative export per module — the exact one the task lib composes — so a module that loads
@@ -32,12 +33,15 @@ const EXPECTED_EXPORTS = {
   exportScaffold: ['selectRecords'],
   hash: ['hashRecord'],
   paths: ['findRoot'],
+  lock: ['withLock', 'acquire', 'inspect', 'isStale', 'LockError'],
+  identity: ['readIdentity', 'isProcessAlive'],
+  attribution: ['resolveAttribution', 'parseSessionRef'],
 };
 
-test('base.js re-exports EXACTLY the 10 expected base modules (no more, no fewer)', () => {
+test('base.js re-exports EXACTLY the 13 expected base modules (no more, no fewer)', () => {
   const keys = Object.keys(base).sort();
   assert.deepStrictEqual(keys, EXPECTED_MODULES.slice().sort(),
-    'base.js must re-export exactly the 10 base modules');
+    'base.js must re-export exactly the 13 base modules');
 });
 
 test('every re-exported base module loaded to a live object (not a null/stub)', () => {
