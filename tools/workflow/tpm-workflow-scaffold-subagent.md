@@ -30,7 +30,7 @@ hand-numbering them, and hand-tracking round lineage. The orchestrator decides
 > throwaway epic and observed to behave as written.
 
 > **Tightening round (2026-08-29) — four fixes from the fable review.** (#3) every
-> `add-phase` now drops a comment-only `tmp/subagent.env` stub (or a consumer override
+> `add-phase` now drops a comment-only `tpm-tmp/subagent.env` stub (or a consumer override
 > template) so the step-zero `source` ritual always succeeds; (#5) a new `--charter <path>`
 > lands a chosen charter (e.g. the mvp opt-down) via the tool; (#6) the ORCHESTRATOR-NOTE
 > strip is now **case-insensitive**; (#9) `plan.md` is seeded from a configured
@@ -56,12 +56,14 @@ dev/<epic-slug>/
 │   ├── findings/                    ← HANDOFF.md, durable outputs
 │   ├── tools/                       ← phase-local scripts
 │   ├── tests/                       ← phase-local tests
-│   └── tmp/                         ← scratch (per-subagent subfolders)
+│   └── tpm-tmp/                     ← scratch (per-subagent subfolders; name = workflow.folders.tmp)
 │       ├── subagent.env            ← comment-only stub (or consumer override) — step-zero sources it
 │       ├── builder-r1/              ← per-subagent scratch (no clobber)
 │       └── verifier-r1-v1/          ← verifier M-of-count gets a -v<M> suffix
 └── ...                              ← next add-phase → 02-…, append-only
 ```
+
+**The subfolder names are configurable (#1183).** `findings/`, `tools/`, `tests/` and the scratch folder come from `workflow.folders` (defaults `findings`, `tools`, `tests`, and `tmp: "tpm-tmp"`); the epic base comes from `workflow.devDir` (default `"dev"`). The diagram shows the defaults. With `{"workflow":{"folders":{"tmp":"scratchy"}}}` in the project config, `add-phase` creates `<phase>/scratchy/` (and `scratchy/subagent.env`, `scratchy/<role>-r1/`) instead. See `docs/config-guide.md` §2. The scratch folder was `tmp/` before #1183; there is no legacy fallback, so an existing phase folder that still has `tmp/` keeps it, and new scaffolding writes `tpm-tmp/`.
 
 ---
 
@@ -72,6 +74,15 @@ dev/<epic-slug>/
 Create `<epic-path>/00-epic-plan/` with `epic-plan.md`, `punchlist.md`, and
 `decisions.md` stubs. Refuses to clobber an existing stub file unless `--force`
 (see [Overwrite protection](#overwrite-protection)).
+
+**Where `<epic-path>` lands (#1183 — behavior change).** A **bare name** (no path separator, not absolute) is resolved under `workflow.devDir` (default `"dev"`): `epic-init foo` creates `dev/foo`. A path **with a separator or an absolute path** is honored as-is and never double-prefixed: `epic-init sub/bar` creates `sub/bar`, `epic-init /abs/baz` creates `/abs/baz`. **This changes what a bare name did:** before #1183, `epic-init foo` created `./foo`; now it creates `dev/foo`. To get the old placement, pass an explicit path (`epic-init ./foo`). The same bare-name rule applies to the `<epic-path>` of `add-phase` and `add-phases`; `add-round` takes a phase path and is unchanged. Callers that already pass `dev/<epic>` are unaffected. `devDir` is config-only (set `workflow.devDir` in `.claude/claude-tpm/config.json`, or pass `--config <path>`); there is no flag or env override. See `docs/config-guide.md` §2.
+
+```
+$ tpm workflow scaffold epic-init foo            # default devDir
+  mkdir:   dev/foo
+$ tpm workflow scaffold epic-init sub/bar        # separator → as-is
+  mkdir:   sub/bar
+```
 
 ```
 $ tpm workflow scaffold epic-init dev/my-epic
@@ -107,11 +118,11 @@ full phase skeleton:
 - `plan.md` — seeded from the config's `planTemplateFile` if one resolves (fix #9;
   see [plan.md & subagent.env seeding](#planmd--subagentenv-seeding)), else a
   sentinel stub (structure only; no charter, no posture).
-- `findings/`, `tools/`, `tests/`, `tmp/`, and a comment-only `tmp/subagent.env`
+- `findings/`, `tools/`, `tests/`, `tpm-tmp/`, and a comment-only `tpm-tmp/subagent.env`
   stub (or the consumer override template — fix #3).
 - **For each role in the team's roster:** `charter-<role>.md` (see
   [Charter resolution](#charter-resolution)), `spawn-prompt-<role>-r1.md`, and a
-  per-subagent `tmp/<role>-r1[-v<M>]/` scratch folder.
+  per-subagent `tpm-tmp/<role>-r1[-v<M>]/` scratch folder.
 - **`--charter <path>` (fix #5)** re-charters ONE role from the given file, routed
   through the same strip + blocked-name guards as a config charter. It targets the
   `--role` named role, or the sole role of a single-role team; a multi-role team
@@ -136,16 +147,16 @@ defaults; the exact set is printed on an unknown-team error):
 $ tpm workflow scaffold add-phase dev/my-epic --slug write-guide --team docs
   ...
   created: dev/my-epic/01-write-guide/plan.md
-  created: dev/my-epic/01-write-guide/tmp/subagent.env
+  created: dev/my-epic/01-write-guide/tpm-tmp/subagent.env
   created: dev/my-epic/01-write-guide/charter-documentarian.md
   created: dev/my-epic/01-write-guide/spawn-prompt-documentarian-r1.md
-  mkdir:   dev/my-epic/01-write-guide/tmp/documentarian-r1
+  mkdir:   dev/my-epic/01-write-guide/tpm-tmp/documentarian-r1
   created: dev/my-epic/01-write-guide/charter-verifier.md
   created: dev/my-epic/01-write-guide/spawn-prompt-verifier-r1.md
-  mkdir:   dev/my-epic/01-write-guide/tmp/verifier-r1-v1
+  mkdir:   dev/my-epic/01-write-guide/tpm-tmp/verifier-r1-v1
 
 add-phase complete: 01-write-guide (roles: documentarian, verifier)
-  tmp/subagent.env ← comment-only stub (orchestrator adds real values as needed)
+  tpm-tmp/subagent.env ← comment-only stub (orchestrator adds real values as needed)
   charter-documentarian.md ← PLACEHOLDER (configured file missing: /.../workflow-setup/charters/documentarian-charter.md)
   charter-verifier.md ← PLACEHOLDER (configured file missing: /.../workflow-setup/charters/verifier-charter.md)
 ```
@@ -170,9 +181,9 @@ written.
 
 Append a kickback round for one role **into the same phase folder**: auto-number
 `r<N>` (**max existing `spawn-prompt-<role>-r*.md` + 1**), and drop
-`spawn-prompt-<role>-r<N>.md` plus the per-subagent `tmp/<role>-r<N>[-v<M>]/`
+`spawn-prompt-<role>-r<N>.md` plus the per-subagent `tpm-tmp/<role>-r<N>[-v<M>]/`
 scratch folder(s). This is the mechanism behind the verify↔bug-fixer kickback
-loop that re-runs in the same phase. It also drops the `tmp/subagent.env` stub if
+loop that re-runs in the same phase. It also drops the `tpm-tmp/subagent.env` stub if
 the phase lacks one.
 
 **`--charter <path>` (fix #5)** (re)drops THIS role's charter from the given file
@@ -189,14 +200,14 @@ charted at `add-phase` time) arrive complete:
 $ tpm workflow scaffold add-round dev/my-epic/02-build-thing --role bug-fixer
   created: .../02-build-thing/spawn-prompt-bug-fixer-r1.md
   created: .../02-build-thing/charter-bug-fixer.md
-  mkdir:   .../02-build-thing/tmp/bug-fixer-r1
+  mkdir:   .../02-build-thing/tpm-tmp/bug-fixer-r1
 
 add-round complete: spawn-prompt-bug-fixer-r1.md + tmp scratch
   charter-bug-fixer.md ← PLACEHOLDER (no override; TPM default charter applies)
 ```
 
 - A **second** `add-round --role bug-fixer` yields `-r2` (spawn-prompt +
-  `tmp/bug-fixer-r2/`) and does **not** re-drop the charter that already exists
+  `tpm-tmp/bug-fixer-r2/`) and does **not** re-drop the charter that already exists
   (no charter line in its output).
 - A re-check round for a **roster role** (e.g. `--role verifier`) auto-numbers the
   next `r<N>`, drops the spawn-prompt + scratch, and **keeps** the charter copied
@@ -204,15 +215,15 @@ add-round complete: spawn-prompt-bug-fixer-r1.md + tmp scratch
 
 ### Scratch-folder naming (`-v<M>` suffix)
 
-Per role+round the `tmp/` scratch is named `tmp/<role>-r<N>[-v<M>]/`:
+Per role+round the scratch folder (`workflow.folders.tmp`, default `tpm-tmp`) is named `tpm-tmp/<role>-r<N>[-v<M>]/`:
 
-- A lone non-verifier role → plain `tmp/<role>-r<N>/` (e.g. `builder-r1`,
+- A lone non-verifier role → plain `tpm-tmp/<role>-r<N>/` (e.g. `builder-r1`,
   `bug-fixer-r1`).
 - The **verifier always gets a `-v<M>` suffix** (blind M-of-count), so a single
-  verifier is `tmp/verifier-r1-v1/` — never a plain `verifier-r1`.
+  verifier is `tpm-tmp/verifier-r1-v1/` — never a plain `verifier-r1`.
 - `--count <N>` on any role fans the scratch out to one folder per instance:
-  `add-round --role builder --count 2` → `tmp/builder-r2-v1/` and
-  `tmp/builder-r2-v2/`.
+  `add-round --role builder --count 2` → `tpm-tmp/builder-r2-v1/` and
+  `tpm-tmp/builder-r2-v2/`.
 
 ---
 
@@ -263,9 +274,9 @@ before. (This kills the "dead config" finding — `planTemplateFile` was resolve
 never consumed.) The scaffold summary prints
 `plan.md ← seeded from planTemplateFile <path>` when a template is used.
 
-### `tmp/subagent.env` stub + consumer override (fix #3)
+### `tpm-tmp/subagent.env` stub + consumer override (fix #3)
 
-The module's step-zero ritual `source`s `tmp/subagent.env`; nothing in the documented
+The module's step-zero ritual `source`s `tpm-tmp/subagent.env`; nothing in the documented
 flow used to create it, so every worker's `source` aborted on a missing file. Now
 `add-phase` (and `add-round`, if absent) drops it:
 
@@ -277,8 +288,8 @@ flow used to create it, so every worker's `source` aborted on a missing file. No
   copied in instead. This is the extensibility hook a child project uses to populate
   emulator env (nbajam/ggaitk). Config value wins over the conventional path.
 
-It is **never clobbered** — an existing `tmp/subagent.env` (e.g. one the orchestrator
-already populated) is left untouched. Summary line: `tmp/subagent.env ← comment-only
+It is **never clobbered** — an existing `tpm-tmp/subagent.env` (e.g. one the orchestrator
+already populated) is left untouched. Summary line: `tpm-tmp/subagent.env ← comment-only
 stub` or `… ← copied from <config|convention> template <path>`.
 
 ---
@@ -357,7 +368,7 @@ tpm workflow scaffold add-phase dev/demo-epic --slug write-guide --team docs
 tpm workflow scaffold add-phase dev/demo-epic --slug build-thing --team full
 
 # 4. Verifier kicked back → spawn the loop's bug-fixer into the SAME phase.
-#    Drops spawn-prompt-bug-fixer-r1.md + charter-bug-fixer.md + tmp/bug-fixer-r1/.
+#    Drops spawn-prompt-bug-fixer-r1.md + charter-bug-fixer.md + tpm-tmp/bug-fixer-r1/.
 tpm workflow scaffold add-round dev/demo-epic/02-build-thing --role bug-fixer
 
 # 5. Re-run the builder (auto-numbers → r2) and re-check the verifier (→ r2, -v1).
@@ -379,7 +390,7 @@ Resulting `02-build-thing/` (observed):
 ├── spawn-prompt-verifier-r1.md     spawn-prompt-verifier-r2.md
 ├── spawn-prompt-bug-fixer-r1.md
 ├── findings/  tools/  tests/
-└── tmp/
+└── tpm-tmp/
     ├── subagent.env                 ← comment-only stub (dropped at add-phase)
     ├── planning-r1/  builder-r1/  builder-r2/  test-writer-r1/
     ├── documentarian-r1/  bug-fixer-r1/

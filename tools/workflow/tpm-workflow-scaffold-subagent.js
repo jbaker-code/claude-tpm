@@ -144,6 +144,31 @@ function writeFileGuarded(target, content, opts, created, patterns) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// #1183: resolved workflow.folders (tmp/findings/tools/tests names). `resolved` may be undefined
+// (add-round when the config can't resolve) -> fall back to the shipped defaults.
+function foldersOf(resolved) {
+  return (resolved && resolved.folders) || configResolver.getDefaults().folders;
+}
+
+/**
+ * #1183: resolve an epic-path positional against workflow.devDir. A BARE name (no path separator, not
+ * absolute) is prefixed with devDir; anything else (`dev/x`, `sub/x`, `/abs/x`) is returned unchanged.
+ */
+function resolveBase(arg, devDir) {
+  if (typeof arg !== 'string' || !arg) return arg;
+  if (path.isAbsolute(arg) || arg.includes('/') || arg.includes('\\')) return arg;
+  return path.join(devDir || configResolver.getDefaults().devDir, arg);
+}
+
+function devDirFor(configPath) {
+  try {
+    const r = configResolver.resolveConfig(configPath, {}).resolved;
+    return (r && r.devDir) || configResolver.getDefaults().devDir;
+  } catch (_e) {
+    return configResolver.getDefaults().devDir;
+  }
+}
+
 // Roster resolution (via tpm-workflow-config-resolver.js) + naming helpers
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -626,10 +651,12 @@ function addPhase(epicPath, { slug, team, configPath, startDir, patterns, charte
   ensureDir(phaseDir, opts, created);
 
   // Standard phase skeleton.
-  ensureDir(path.join(phaseDir, 'findings'), opts, created);
-  ensureDir(path.join(phaseDir, 'tools'), opts, created);
-  ensureDir(path.join(phaseDir, 'tests'), opts, created);
-  const tmpDir = ensureDir(path.join(phaseDir, 'tmp'), opts, created);
+  // #1183: subfolder names come from the resolved workflow.folders (default tmp -> tpm-tmp).
+  const folders = foldersOf(roster.resolved);
+  ensureDir(path.join(phaseDir, folders.findings), opts, created);
+  ensureDir(path.join(phaseDir, folders.tools), opts, created);
+  ensureDir(path.join(phaseDir, folders.tests), opts, created);
+  const tmpDir = ensureDir(path.join(phaseDir, folders.tmp), opts, created);
 
   // plan.md — seed from a configured planTemplateFile if one resolves (tightening fix #9),
   // else the built-in stub. Exactly one plan per phase either way.
@@ -806,7 +833,7 @@ function addRound(phasePath, { role, count, patterns, configPath, startDir, char
     }
   }
 
-  const tmpDir = ensureDir(path.join(phasePath, 'tmp'), opts, created);
+  const tmpDir = ensureDir(path.join(phasePath, foldersOf(resolved).tmp), opts, created);
   // subagent.env comment-only stub (or consumer override) — dropped if absent (fix #3). A
   // re-round in an existing phase usually already has one from add-phase; this covers a phase
   // scaffolded before the stub existed, or a role that joins a bare phase.
@@ -872,14 +899,14 @@ function main() {
 
   try {
     if (sub === 'epic-init') {
-      const epicPath = args._[1];
-      if (!epicPath) throw new Error('epic-init: <epic-path> is required.');
+      if (!args._[1]) throw new Error('epic-init: <epic-path> is required.');
+      const epicPath = resolveBase(args._[1], devDirFor(args.config));
       const r = epicInit(epicPath, opts);
       process.stdout.write(`\nepic-init complete: ${r.epicPath}\n`);
       process.stdout.write('Next: add-phase <epic-path> --slug <slug> --team <team>\n');
     } else if (sub === 'add-phase') {
-      const epicPath = args._[1];
-      if (!epicPath) throw new Error('add-phase: <epic-path> is required.');
+      if (!args._[1]) throw new Error('add-phase: <epic-path> is required.');
+      const epicPath = resolveBase(args._[1], devDirFor(args.config));
       const r = addPhase(epicPath, {
         slug: args.slug, team: args.team, configPath: args.config, charter: args.charter, charterRole: args.role,
         pretaskAck: args.pretaskAck,
@@ -888,8 +915,8 @@ function main() {
       if (r.ackNote) process.stdout.write(`  pre-task ack ✓ ${r.ackNote.path} ("${r.ackNote.value}")\n`);
       if (r.planSeed && r.planSeed.fromTemplate) process.stdout.write(`  plan.md ← seeded from planTemplateFile ${r.planSeed.source}\n`);
       if (r.envNote) {
-        if (r.envNote.fromTemplate) process.stdout.write(`  tmp/subagent.env ← copied from ${r.envNote.via} template ${r.envNote.source}\n`);
-        else process.stdout.write('  tmp/subagent.env ← comment-only stub (orchestrator adds real values as needed)\n');
+        if (r.envNote.fromTemplate) process.stdout.write(`  ${path.basename(path.dirname(r.envNote.target))}/subagent.env ← copied from ${r.envNote.via} template ${r.envNote.source}\n`);
+        else process.stdout.write(`  ${path.basename(path.dirname(r.envNote.target))}/subagent.env ← comment-only stub (orchestrator adds real values as needed)\n`);
       }
       for (const n of r.charterNotes) {
         const tag = n.override ? ' [--charter override]' : '';
@@ -898,8 +925,8 @@ function main() {
         else process.stdout.write(`  charter-${n.role}.md ← PLACEHOLDER (no override; TPM default charter applies)\n`);
       }
     } else if (sub === 'add-phases') {
-      const epicPath = args._[1];
-      if (!epicPath) throw new Error('add-phases: <epic-path> is required.');
+      if (!args._[1]) throw new Error('add-phases: <epic-path> is required.');
+      const epicPath = resolveBase(args._[1], devDirFor(args.config));
       const r = addPhases(epicPath, {
         slugs: args.slugs, team: args.team, configPath: args.config, charter: args.charter, charterRole: args.role,
         pretaskAck: args.pretaskAck,
@@ -914,8 +941,8 @@ function main() {
       }, opts);
       process.stdout.write(`\nadd-round complete: spawn-prompt-${r.role}-r${r.round}.md + tmp scratch\n`);
       if (r.envNote) {
-        if (r.envNote.fromTemplate) process.stdout.write(`  tmp/subagent.env ← copied from ${r.envNote.via} template ${r.envNote.source}\n`);
-        else process.stdout.write('  tmp/subagent.env ← comment-only stub\n');
+        if (r.envNote.fromTemplate) process.stdout.write(`  ${path.basename(path.dirname(r.envNote.target))}/subagent.env ← copied from ${r.envNote.via} template ${r.envNote.source}\n`);
+        else process.stdout.write(`  ${path.basename(path.dirname(r.envNote.target))}/subagent.env ← comment-only stub\n`);
       }
       if (r.charterNote) {
         const tag = r.charterNote.override ? ' [--charter override]' : '';
@@ -939,6 +966,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  resolveBase,
   epicInit,
   addPhase,
   addPhases,

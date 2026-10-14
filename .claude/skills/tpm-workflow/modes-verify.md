@@ -24,7 +24,7 @@ verify↔bug-fixer loop (on FAIL only), and routes each stop with judgment.
   ONE canonical manifest — see `modes-plan.md` §6; `--manifest` stays an optional override). Spawn via `tpm-spawn`
   (single) or `tpm-spawn-team` (roster).
 - **Verdict lands at `findings/verifier-r<N>-v<M>-verdict.md`** ("verdict" avoids the blocked
-  "findings" filename pattern). Scratch/captures → the verifier's own `tmp/verifier-r<N>-v<M>/`.
+  "findings" filename pattern). Scratch/captures → the verifier's own `tpm-tmp/verifier-r<N>-v<M>/`.
 
 ## Multiple verifiers (`count > 1`)
 

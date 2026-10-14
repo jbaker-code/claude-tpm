@@ -26,7 +26,7 @@ point `--out` at. It never modifies any task folder.
 | Flag | Required | Default | Effect |
 |------|----------|---------|--------|
 | `--out <path>` | **yes** | none | Output markdown report path. No default — omitting it fails loudly (exit 1). Parent dirs are created. |
-| `--tasks-root <dir>` | no | `work` | The task tree to scan. Point it at a scratch tree so the real `dev/` tree isn't required (used by the tests and by this doc's example). |
+| `--tasks-root <dir>` | no | `workflow.devDir` (default `dev`) | The task tree to scan. Point it at a scratch tree so the real `dev/` tree isn't required (used by the tests and by this doc's example). |
 | `--strict` | no | off | Exit `3` (instead of `0`) if ANY epic/phase violation is found. The report is still written either way. Useful in CI. |
 | `--help`, `-h` | no | — | Print usage and exit `0`. |
 
@@ -46,13 +46,13 @@ An unknown argument fails with `unknown arg: <arg>` and exit `1`.
   are allowed (a phase can legitimately carry, e.g., a builder and a verifier charter).
 - **`00-epic-plan/` charter-cleanliness (structural scope only — see below).**
 
-Also flags any scratch dir (`tmp`/`scratch`/`research`) nested inside a phase's `findings/`.
+Also flags any scratch dir (the configured scratch folder — `tpm-tmp` by default — plus `scratch`/`research`) nested inside a phase's `findings/`.
 
 ### FLAT entries (legacy)
 
 - `plan.md` and `findings/` presence.
-- Scratch-shaped dirs (`tmp`/`scratch`/`research`) wrongly nested under `findings/` (they belong in the
-  task's own `tmp/`) — reported as drift.
+- Scratch-shaped dirs (the configured scratch folder `workflow.folders.tmp`, default `tpm-tmp`, plus `scratch`/`research`) wrongly nested under `findings/` (they belong in the
+  task's own `tpm-tmp/`) — reported as drift. The drift message names the configured folder: ``(move to task `tpm-tmp/`)``. A plain `findings/tmp/` is no longer flagged under the default config.
 - Stray files/dirs at the task root that aren't part of the recognized layout.
 
 ### The charter-cleanliness check is STRUCTURAL scope only
@@ -87,7 +87,7 @@ three structural markers.
 
 ## Worked example
 
-Built a scratch tree under `tmp/` containing a clean epic (`demo-epic`), a deliberately broken epic
+Built a scratch tree (any throwaway dir) containing a clean epic (`demo-epic`), a deliberately broken epic
 (`broken-epic`), and a legacy flat task (`legacy-task`), then ran:
 
 ```
@@ -97,7 +97,7 @@ tpm workflow audit \
 
 `broken-epic` carried four seeded problems (a `misc-notes/` folder with no `NN-` prefix, two phases both
 numbered `03`, a phase with two `plan*.md` files and no charter, and a `## The one rule` heading pasted
-into its `00-epic-plan/epic-plan.md`); `legacy-task` had a `findings/tmp/` scratch dir and a stray
+into its `00-epic-plan/epic-plan.md`); `legacy-task` had a `findings/tpm-tmp/` scratch dir and a stray
 `stray-note.md` at its root.
 
 Observed console output:

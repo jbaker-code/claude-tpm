@@ -9,12 +9,12 @@
  * ledger that travels with the round.
  *
  * WHERE THE LEDGER LIVES.
- *   • Flat round (default): `<dir>/tmp/cost-ledger.md`  (via --dir).
+ *   • Flat round (default): `<dir>/<tmp>/cost-ledger.md`  (via --dir).
  *   • Epic level: `<epic>/00-epic-plan/cost-ledger.md`  (via --epic-path) — the
  *     cross-phase home is charter-clean orchestrator state, so the epic's own
  *     ledger lives there, NOT in a tmp/ that gets swept.
  *
- * ROLLUP. `--rollup <epic>` scans every phase's `NN-<slug>/tmp/cost-ledger.md`
+ * ROLLUP. `--rollup <epic>` scans every phase's `NN-<slug>/<tmp>/cost-ledger.md`
  * PLUS the epic-level `00-epic-plan/cost-ledger.md` and prints a per-phase
  * breakdown + the epic-wide token/tool-call totals. Read-only.
  *
@@ -25,7 +25,7 @@
  * PORTABILITY. Project-agnostic. No project paths, no domain knowledge.
  *
  * USAGE.
- *   # append a row to a flat round's ledger (<dir>/tmp/cost-ledger.md)
+ *   # append a row to a flat round's ledger (<dir>/<tmp>/cost-ledger.md)
  *   tpm workflow cost --dir "<working folder>" \
  *     --agent round-w-8b3e --role worker --model opus \
  *     --tokens 715k --calls 198 --verdict ACCEPT --round "phase B" --note "ok"
@@ -74,7 +74,15 @@
 const fs = require('fs');
 const path = require('path');
 // Phase 18 — informational session stamp (shared resolver; never throws, never blocks).
+// #1183: the scratch-folder name comes from the resolved workflow.folders.tmp (default tpm-tmp).
+const configResolver = require('./tpm-workflow-config-resolver.js');
 const { resolveAttribution, toEventFields, parseExplicit } = require('../lib/attribution');
+
+function tmpFolderName() {
+  try { return configResolver.resolveConfig(undefined, {}).resolved.folders.tmp; }
+  catch (_e) { return configResolver.getDefaults().folders.tmp; }
+}
+const TMP_DIR = tmpFolderName();
 
 function arg(name, def) {
   const i = process.argv.indexOf(`--${name}`);
@@ -89,7 +97,7 @@ if (arg('help') === true || arg('h') === true ||
   console.log('tpm workflow cost (v2) — append a subagent cost row, print a total, or roll up an epic.');
   console.log('');
   console.log('Targets (exactly one required):');
-  console.log('  --dir <path>        flat round ledger at <path>/tmp/cost-ledger.md');
+  console.log('  --dir <path>        flat round ledger at <path>/<tmp>/cost-ledger.md');
   console.log('  --epic-path <path>  epic ledger at <path>/00-epic-plan/cost-ledger.md');
   console.log('  --rollup <path>     aggregate all phase + epic ledgers under <path>');
   console.log('');
@@ -202,14 +210,14 @@ if (hasRollup) {
     .map(e => e.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   for (const name of phaseDirs) {
-    const ledger = path.join(epic, name, 'tmp', ledgerName);
+    const ledger = path.join(epic, name, TMP_DIR, ledgerName);
     if (fs.existsSync(ledger)) targets.push({ label: name, ledger });
   }
 
   console.log(`Cost rollup — ${epic}`);
   if (!targets.length) {
     console.log('  (no ledgers found — looked for 00-epic-plan/' + ledgerName +
-      ' and NN-*/tmp/' + ledgerName + ')');
+      ' and NN-*/' + TMP_DIR + '/' + ledgerName + ')');
     process.exit(0);
   }
 
@@ -237,7 +245,7 @@ let ledgerPath;
 if (hasEpic) {
   ledgerPath = path.join(epicArg, EPIC_PLAN_DIR, ledgerName);
 } else {
-  ledgerPath = path.join(dirArg, 'tmp', ledgerName);
+  ledgerPath = path.join(dirArg, TMP_DIR, ledgerName);
 }
 
 // --- SUMMARY mode -------------------------------------------------------------

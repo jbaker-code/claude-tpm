@@ -271,6 +271,36 @@ function main() {
     assert.deepStrictEqual(resolved.deliverables, { tldr: true, toolFeedback: true, wiki: false });
   });
 
+  check('#1183: defaults carry workflow.folders + workflow.devDir', () => {
+    const d = getDefaults();
+    assert.deepStrictEqual(d.folders, { tmp: 'tpm-tmp', findings: 'findings', tools: 'tools', tests: 'tests' });
+    assert.strictEqual(d.devDir, 'dev');
+  });
+
+  check('#1183: mergeWorkflowConfig applies folders.tmp + devDir overrides (not dropped), shallow-merging folders', () => {
+    const resolved = mergeWorkflowConfig({ folders: { tmp: 'scratch-x' }, devDir: 'docs/dev' });
+    assert.strictEqual(resolved.folders.tmp, 'scratch-x');
+    assert.strictEqual(resolved.folders.findings, 'findings');
+    assert.strictEqual(resolved.folders.tools, 'tools');
+    assert.strictEqual(resolved.folders.tests, 'tests');
+    assert.strictEqual(resolved.devDir, 'docs/dev');
+    assert.strictEqual(mergeWorkflowConfig({ devDir: 42 }).devDir, 'dev', 'non-string devDir ignored');
+  });
+
+  check('#1183: a project config.json override of folders.tmp + devDir flows through resolveConfig', () => {
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'tpm-1183-'));
+    fs.mkdirSync(path.join(proj, '.claude', 'claude-tpm'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.claude', 'claude-tpm', 'config.json'),
+      JSON.stringify({ workflow: { folders: { tmp: 'my-tmp' }, devDir: 'work' } }),
+    );
+    const { resolved } = resolveConfig(undefined, { startDir: proj });
+    assert.strictEqual(resolved.folders.tmp, 'my-tmp');
+    assert.strictEqual(resolved.folders.findings, 'findings');
+    assert.strictEqual(resolved.devDir, 'work');
+    fs.rmSync(proj, { recursive: true, force: true });
+  });
+
   check('mergeWorkflowConfig replaces blockedFilenamePatterns wholesale', () => {
     const resolved = mergeWorkflowConfig({ blockedFilenamePatterns: ['draft'] });
     assert.deepStrictEqual(resolved.blockedFilenamePatterns, ['draft']);

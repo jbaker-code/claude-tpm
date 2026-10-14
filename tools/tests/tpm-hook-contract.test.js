@@ -142,8 +142,9 @@ check('gate-spawn: after the signoff is recorded (from a SUBFOLDER, root via TPM
   const q = runTpm(BUNDLE, ['workflow', 'signoff', 'questions', '--roster', 'x'], { cwd: sub, env });
   const s = runTpm(BUNDLE, ['workflow', 'signoff', 'spawn', '--round', ROUND, '--roster', 'x'], { cwd: sub, env });
   assert.strictEqual(q.status, 0, q.all); assert.strictEqual(s.status, 0, s.all);
-  assert.ok(fs.existsSync(path.join(proj, 'tmp', 'tpm-signoff')), 'tokens landed under the PROJECT root, not the subfolder');
-  assert.ok(!fs.existsSync(path.join(sub, 'tmp')));
+  assert.ok(fs.existsSync(path.join(proj, 'tpm-tmp', 'tpm-signoff', 'questions.json')), 'questions token landed under the PROJECT root tpm-tmp, not the subfolder');
+  assert.ok(fs.existsSync(path.join(proj, ROUND, 'tpm-tmp', 'tpm-signoff', 'spawn.json')), 'spawn token landed round-scoped under the PROJECT root');
+  assert.ok(!fs.existsSync(path.join(sub, 'tpm-tmp')) && !fs.existsSync(path.join(sub, 'tmp')));
   const ok = runCommand(only('PreToolUse').command, BUNDLE, gateEnv, marked());
   assert.deepStrictEqual([ok.status, ok.out, ok.err], [0, '', '']);
   const other = marked().replace(ROUND, 'dev/demo-epic/02-other');

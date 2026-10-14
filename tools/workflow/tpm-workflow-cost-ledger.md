@@ -26,9 +26,9 @@ usage error (exit `2`).
 
 | Target flag | Ledger location | Mode |
 |-------------|-----------------|------|
-| `--dir <path>` | `<path>/tmp/cost-ledger.md` | Flat round ledger. Append a row, or (with `--summary`) print its total. |
-| `--epic-path <path>` | `<path>/00-epic-plan/cost-ledger.md` | Epic-level ledger — deliberately in `00-epic-plan/` (charter-clean orchestrator state), **not** in a `tmp/` that gets swept. Append a row, or (with `--summary`) print its total. |
-| `--rollup <path>` | reads all of them | Aggregate an epic: scan every phase's `NN-<slug>/tmp/cost-ledger.md` **plus** the epic-level `00-epic-plan/cost-ledger.md`, print a per-phase breakdown and the epic-wide totals. Read-only; prints and exits. |
+| `--dir <path>` | `<path>/tpm-tmp/cost-ledger.md` | Flat round ledger. Append a row, or (with `--summary`) print its total. |
+| `--epic-path <path>` | `<path>/00-epic-plan/cost-ledger.md` | Epic-level ledger — deliberately in `00-epic-plan/` (charter-clean orchestrator state), **not** in a `tpm-tmp/` that gets swept. Append a row, or (with `--summary`) print its total. |
+| `--rollup <path>` | reads all of them | Aggregate an epic: scan every phase's `NN-<slug>/tpm-tmp/cost-ledger.md` **plus** the epic-level `00-epic-plan/cost-ledger.md`, print a per-phase breakdown and the epic-wide totals. Read-only; prints and exits. |
 
 Behaviour is chosen by which flags are present: `--summary` → print totals (no row written); `--rollup`
 → aggregate; otherwise → append a row.
@@ -110,7 +110,7 @@ cost-ledger: --session: 'zz' is not a session reference (use 0012, 0012b, 12b or
 
 ## Worked examples
 
-All run against scratch folders under `tmp/`.
+All run against throwaway scratch folders; the flat-round ledger lands in `<dir>/tpm-tmp/`. The name is the `workflow.folders.tmp` config key (default `tpm-tmp`; see `docs/config-guide.md` §2) and the `--rollup` scan uses the same name. Re-run against the current tool: `--dir` wrote `<dir>/tpm-tmp/cost-ledger.md`, and `--rollup` picked up a phase ledger at `01-p/tpm-tmp/cost-ledger.md`.
 
 ### Append two rows to a flat round ledger, then summarize
 
@@ -122,17 +122,17 @@ tpm workflow cost --dir <round-a> \
 tpm workflow cost --dir <round-a> --summary
 ```
 
-The first append printed (ledger written to `<round-a>/tmp/cost-ledger.md`):
+The first append printed (ledger written to `<round-a>/tpm-tmp/cost-ledger.md`):
 
 ```
-cost-ledger: appended to …/round-a/tmp/cost-ledger.md
+cost-ledger: appended to …/round-a/tpm-tmp/cost-ledger.md
   | 2026-08-29 | phase B | w1 | worker | opus | 715,000 | 198 | ACCEPT | ok |
 ```
 
 `--summary` printed:
 
 ```
-Cost ledger — …/round-a/tmp/cost-ledger.md
+Cost ledger — …/round-a/tpm-tmp/cost-ledger.md
   2 subagent(s)
   tokens: 1,915,000 total (2 row(s) with a token count)
   calls:  238 total (2 row(s) with a call count)
@@ -142,14 +142,14 @@ Cost ledger — …/round-a/tmp/cost-ledger.md
 
 (715k + 1.2m = 1,915,000; 198 + 40 = 238.)
 
-### Append to the epic ledger (lands in `00-epic-plan/`, not `tmp/`)
+### Append to the epic ledger (lands in `00-epic-plan/`, not `tpm-tmp/`)
 
 ```
 tpm workflow cost --epic-path <my-epic> \
   --agent orch --role orchestrator --tokens 40k --calls 12 --round "epic bookkeeping"
 ```
 
-Verified the row landed at `<my-epic>/00-epic-plan/cost-ledger.md` and that **no** `<my-epic>/tmp/`
+Verified the row landed at `<my-epic>/00-epic-plan/cost-ledger.md` and that **no** `<my-epic>/tpm-tmp/`
 ledger was created.
 
 ### Roll the whole epic up
@@ -186,6 +186,6 @@ no `--model` fall under `(none)`).
 
 The tool's tests live under `tools/workflow/tests/tpm-workflow-audit-cost/` — run the full suite with `npm test` (exit 0 = all
 pass). Confirmed green: **21/21 assertions passed**. It covers the flat append + `--summary` total, token
-parsing (`715k` / `1.2m`), the `--epic-path` target landing in `00-epic-plan/` (and *not* `tmp/`), the
+parsing (`715k` / `1.2m`), the `--epic-path` target landing in `00-epic-plan/` (and *not* `tpm-tmp/`), the
 `--rollup` aggregation across phase + epic ledgers, the mutually-exclusive-target guard (exit `2`), and
 `--help` (exit `0`).

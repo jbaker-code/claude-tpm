@@ -52,13 +52,14 @@ function checkCharters(projectRoot) {
 
 function checkSignoffWritable(projectRoot) {
   try {
-    const d = path.join(projectRoot, 'tmp', 'tpm-signoff');
+    const d = require('./tpm-workflow-signoff.js').signoffDir(projectRoot);
+    const rel = path.relative(projectRoot, d).split(path.sep).join('/');
     fs.mkdirSync(d, { recursive: true });
     const probe = path.join(d, '.doctor-probe');
     fs.writeFileSync(probe, 'x'); fs.unlinkSync(probe);
-    return { ok: true, detail: 'signoff store (tmp/tpm-signoff) is writable' };
+    return { ok: true, detail: `signoff store (${rel}) is writable` };
   } catch (e) {
-    return { ok: false, detail: `cannot write tmp/tpm-signoff: ${e.message}`, fix: 'ensure tmp/ is writable — signoff tokens gate spawns.' };
+    return { ok: false, detail: `cannot write the signoff store: ${e.message}`, fix: 'ensure the configured tmp folder (workflow.folders.tmp) is writable — signoff tokens gate spawns.' };
   }
 }
 

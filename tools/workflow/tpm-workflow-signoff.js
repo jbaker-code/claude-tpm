@@ -18,7 +18,8 @@
  *   EXIST (Gate A happened) — existence, NOT freshness, since Gate A → Gate B spans human latency;
  *   the freshness that matters is on the "spawn" token, checked by the hook right before the spawn.
  *
- * Tokens are small JSON files under <projectRoot>/tmp/tpm-signoff/. Each carries a
+ * Tokens are small JSON files under <projectRoot>/tpm-tmp/tpm-signoff/ (questions + round-less spawn), or for a
+ * round-scoped spawn token <projectRoot>/<round>/tpm-tmp/tpm-signoff/spawn.json (#1183). Each carries a
  * timestamp (freshness is the load-bearing check — a stale "go" doesn't authorize a new
  * round) + the session id + a one-line roster description (so a token for round A can't be
  * silently reused to wave through a different round B).
@@ -28,14 +29,14 @@
  *   tpm workflow signoff spawn --round "<phase-dir>" --roster "<one-line>"  # token 2 (after an explicit "kick it off")
  *       --round is the phase-folder path the kickoff authorizes; the hook matches it to the spawn's
  *       `tpm-workflow-spawn phase=…` marker so one round's "go" can't authorize a different round.
- *       Spawn tokens are keyed BY ROUND (`spawn-<hash>.json`), so a PARALLEL FAN-OUT (an epic of N
+ *       Spawn tokens are ROUND-SCOPED (`<round>/tpm-tmp/tpm-signoff/spawn.json`), so a PARALLEL FAN-OUT (an epic of N
  *       phases) can hold N fresh per-phase tokens at once — one `spawn --round <phase>` per phase, or
  *       one epic-level token (`--round <epic-path>`) with every phase marker set to `phase="<epic-path>"`.
  *   tpm workflow signoff check --gate spawn|questions [--roster "…"] [--round "…"] [--max-age <sec>]
  *                                                          # exit 0 if a FRESH matching token exists, else 1
  *       --session <ref> / --track <letter>  (questions|spawn) attribute the token to a session (0012b, or 0012 --track b); default: auto-resolved
  *   tpm workflow signoff status                                 # print both tokens' freshness (human-readable)
- *   tpm workflow signoff clear                                  # remove ALL tokens: questions + every per-round spawn (round done / reset)
+ *   tpm workflow signoff clear [--round "<phase-dir>"]          # no --round: clear project-root questions + spawn; --round: clear ONLY that round's spawn token
  *   tpm workflow signoff --help
  *
  * CONVENTIONS: zero deps (Node built-ins only). Run via `tpm workflow signoff …`. Also a module
@@ -49,7 +50,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 // #1133 — shared root resolver (deliberate cross-suite exception; see findProjectRoot below).
 const { findRoot } = require('../lib/paths');
 // Phase 18 — informational session stamp (shared resolver; never throws, never blocks). Keys tpmSession/tpmSessionVia, NOT `session`.
@@ -65,19 +65,37 @@ function findProjectRoot(startDir) {
   return findRoot({ startDir });
 }
 
-function signoffDir(root) {
-  return path.join(root || findProjectRoot(), 'tmp', 'tpm-signoff');
-}
-// The "questions" token is single (`questions.json`). The "spawn" token is keyed BY ROUND
-// (`spawn-<hash>.json`) so a PARALLEL FAN-OUT can hold N fresh per-phase tokens at once — each phase =
-// its own round = its own token file. Before this, a single `spawn.json` was overwritten by each
-// write, so 6 phase-bound tokens collapsed to 1 and only the last round could spawn (claude-decant,
-// 2026-09-01). A round-less spawn write still falls back to `spawn.json` (back-compat).
-function tokenPath(gate, root, round) {
-  if (gate === 'spawn' && round) {
-    const h = crypto.createHash('sha1').update(String(round)).digest('hex').slice(0, 12);
-    return path.join(signoffDir(root), `spawn-${h}.json`);
+// #1188 — the configured scratch-folder name (workflow.folders.tmp, default `tpm-tmp`), resolved from `root`.
+// Mirrors the composer's resolveTmpName. NEVER throws: the gate hook calls signoffDir on every spawn.
+function resolveTmpName(root) {
+  try {
+    const cr = require('./tpm-workflow-config-resolver.js');
+    const r = cr.resolveConfig(undefined, { startDir: root || undefined }).resolved;
+    if (r && r.folders && typeof r.folders.tmp === 'string' && r.folders.tmp) return r.folders.tmp;
+    return cr.getDefaults().folders.tmp;
+  } catch (_e) {
+    return 'tpm-tmp';
   }
+}
+
+// #1183 D1 — the store lives under the per-work-folder `tpm-tmp`. With a `round` (the phase-folder path the
+// kickoff authorizes) it is ROUND-SCOPED: <root>/<round>/tpm-tmp/tpm-signoff. Without one it is the project-root
+// store <root>/tpm-tmp/tpm-signoff. Clean break: NO legacy `tmp/` fallback. path.resolve so a relative OR
+// absolute round both resolve correctly under a space-bearing root.
+function signoffDir(root, round) {
+  const r = root || findProjectRoot();
+  const rd = (round || '').trim();
+  const tmp = resolveTmpName(r);
+  if (rd) return path.join(path.resolve(r, rd), tmp, 'tpm-signoff');
+  return path.join(r, tmp, 'tpm-signoff');
+}
+// #1183 D2 — token split. The "questions" token is single and stays at the PROJECT ROOT (`questions.json`; Gate A
+// gates scaffolding, which runs before the phase folder exists). The "spawn" token is ROUND-SCOPED: it lives in the
+// round's own `tpm-tmp/tpm-signoff/spawn.json` — the directory IS the scope, so the old sha1-of-round filename is
+// gone — and a PARALLEL FAN-OUT still holds N fresh per-phase tokens at once (one dir per phase). A round-less
+// spawn write falls back to the project-root `spawn.json` (back-compat).
+function tokenPath(gate, root, round) {
+  if (gate === 'spawn' && round) return path.join(signoffDir(root, round), 'spawn.json');
   return path.join(signoffDir(root), `${gate}.json`);
 }
 
@@ -98,10 +116,10 @@ function writeToken(gate, { roster, root, now, round, explicit } = {}) {
         + 'THEN get an explicit "kick it off".');
     }
   }
-  const dir = signoffDir(r);
+  const roundNorm = (round || '').trim() || null;
+  const dir = path.dirname(tokenPath(gate, r, roundNorm));
   fs.mkdirSync(dir, { recursive: true });
   const nowMs = now || Date.now();
-  const roundNorm = (round || '').trim() || null;
   const token = {
     gate,
     tsSec: Math.floor(nowMs / 1000),
@@ -167,16 +185,15 @@ function isFresh(gate, { root, maxAge = DEFAULT_MAX_AGE_SEC, roster, now, sessio
   return { ok: true, reason: 'fresh', token: t, ageSec };
 }
 
-// Remove ALL sign-off tokens: questions.json + every per-round spawn token (spawn.json + spawn-<hash>.json).
-function clearTokens({ root } = {}) {
+// Remove sign-off tokens. Round-aware (#1183 D2): with an explicit `round`, clear ONLY that round's spawn token
+// (its round-scoped dir) — no dev/** scan. Without a round, clear the PROJECT-ROOT store: questions.json + spawn.json.
+function clearTokens({ root, round } = {}) {
   const removed = [];
-  const dir = signoffDir(root);
-  let files;
-  try { files = fs.readdirSync(dir); } catch (_e) { return removed; }
-  for (const f of files) {
-    if (f === 'questions.json' || /^spawn(-[0-9a-f]{12})?\.json$/.test(f)) {
-      try { fs.unlinkSync(path.join(dir, f)); removed.push(f.replace(/\.json$/, '')); } catch (_e) { /* ignore */ }
-    }
+  const rd = (round || '').trim();
+  const dir = signoffDir(root, rd || undefined);
+  const names = rd ? ['spawn.json'] : ['questions.json', 'spawn.json'];
+  for (const f of names) {
+    try { fs.unlinkSync(path.join(dir, f)); removed.push(f.replace(/\.json$/, '')); } catch (_e) { /* absent -> ignore */ }
   }
   return removed;
 }
@@ -231,7 +248,7 @@ function main() {
         process.stdout.write(`${gate.padEnd(10)} ${res.ok ? `FRESH (${res.ageSec}s)` : `— ${res.reason}`}\n`);
       }
     } else if (cmd === 'clear') {
-      const removed = clearTokens({});
+      const removed = clearTokens({ round: args.round });
       process.stdout.write(`cleared: ${removed.length ? removed.join(', ') : '(none)'}\n`);
     } else {
       process.stderr.write(`Unknown command: ${cmd}\n`); printHelp(); process.exit(2);

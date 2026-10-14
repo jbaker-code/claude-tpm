@@ -640,8 +640,10 @@ spawn      — "spawn" sign-off is STALE (74951s old > 1800s max)
   one confirmation, short enough that yesterday's "go" can't authorize today's round. The two tokens
   are different events: the **questions** token (Gate A) only has to *exist* to clear scaffolding,
   while the **spawn** token (Gate B) must be *fresh* — the hook checks it right before the spawn. Both
-  live as small JSON files under `<project-root>/tmp/tpm-signoff/`, keyed by round so one round's "go"
-  can't wave through another; `npx tpm workflow signoff clear` wipes them when a round is done. In an
+  live as small JSON files in a `tpm-signoff/` folder under a `tpm-tmp/` folder: the **spawn** token is round-scoped, at
+  `<phase>/tpm-tmp/tpm-signoff/spawn.json`, so one round's "go" can't wave through another; the **questions** token is
+  project-wide, at `<project-root>/tpm-tmp/tpm-signoff/questions.json` (Gate A runs before the phase folder exists). The
+  folder name is the fixed literal `tpm-tmp`; it does **not** follow a `workflow.folders.tmp` override; `npx tpm workflow signoff clear` wipes them when a round is done. In an
   empty store, `signoff status` reports `no "questions" sign-off token on disk` for each gate; once
   Gate A is recorded it reads `questions FRESH (0s)`.
 
@@ -678,7 +680,7 @@ spawn.
 
 1. Scaffolds the work folder (`npx tpm workflow scaffold`) — creates the numbered phase folder with a
    `plan.md` stub, the role's `charter-<role>.md`, the spawn-prompt stub, and `findings/ tools/ tests/
-   tmp/`.
+   tpm-tmp/`.
 2. Fills `plan.md` (structure only — the posture lives in the charter file).
 3. Composes the spawn prompt (`npx tpm workflow compose`) — emits the working-folder line, the read
    order, the env-source ritual, constraints, and the return shape.
@@ -828,7 +830,7 @@ dev/<epic>/
     spawn-prompt-<role>-r<N>.md   #   the composed, linted prompt actually sent
     findings/HANDOFF.md    #   the single rolling state doc for the phase
     findings/verifier-r<N>-v<M>-verdict.md   #   the verifier's verdict, when one ran
-    tools/ tests/ tmp/     #   the deliverable's supports and per-agent scratch
+    tools/ tests/ tpm-tmp/ #   the deliverable's supports and per-agent scratch
 ```
 
 Each retry re-runs in the **same** phase folder (the `-r<N>` prompts are the history); a genuinely new

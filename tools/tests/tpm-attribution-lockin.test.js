@@ -308,7 +308,7 @@ test('W-1 cost ledger: trailing Session column stamped; blank cell with no sessi
   assert.strictEqual(wf('tpm-workflow-cost-ledger.js', ['--dir', dir, '--agent', 'a', '--tokens', '1k'], withSess).status, 0);
   assert.strictEqual(wf('tpm-workflow-cost-ledger.js', ['--dir', dir, '--agent', 'b', '--tokens', '1k'], noSess).status, 0);
   assert.strictEqual(wf('tpm-workflow-cost-ledger.js', ['--dir', dir, '--agent', 'c', '--tokens', '1k', '--session', '7'], withSess).status, 0);
-  const led = fs.readFileSync(path.join(dir, 'tmp', 'cost-ledger.md'), 'utf8').split('\n');
+  const led = fs.readFileSync(path.join(dir, 'tpm-tmp', 'cost-ledger.md'), 'utf8').split('\n');
   assert.ok(/\| Notes \| Session \|$/.test(led.find((l) => l.startsWith('| Date'))), 'header ends with Session');
   const rowOf = (agent) => led.find((l) => new RegExp('\\| ' + agent + ' \\|').test(l));
   assert.ok(/\| session-0012b \|$/.test(rowOf('a')), 'lookup-stamped: ' + rowOf('a'));
@@ -317,11 +317,11 @@ test('W-1 cost ledger: trailing Session column stamped; blank cell with no sessi
   assert.strictEqual(wf('tpm-workflow-cost-ledger.js', ['--dir', dir, '--agent', 'z', '--session', 'zz'], noSess).status, 2);
   const out = wf('tpm-workflow-cost-ledger.js', ['--dir', dir, '--summary'], noSess).stdout;
   assert.match(out, /3 subagent/);
-  const old = fresh('old'); fs.mkdirSync(path.join(old, 'tmp'), { recursive: true });
-  fs.writeFileSync(path.join(old, 'tmp', 'cost-ledger.md'), '# Cost ledger\n\n| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes |\n|------|---------------|-------|------|-------|-------:|------:|---------|-------|\n| 2026-01-01 | r | a | b | m | 1,000 | 2 | ok | n |\n');
+  const old = fresh('old'); fs.mkdirSync(path.join(old, 'tpm-tmp'), { recursive: true });
+  fs.writeFileSync(path.join(old, 'tpm-tmp', 'cost-ledger.md'), '# Cost ledger\n\n| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes |\n|------|---------------|-------|------|-------|-------:|------:|---------|-------|\n| 2026-01-01 | r | a | b | m | 1,000 | 2 | ok | n |\n');
   assert.match(wf('tpm-workflow-cost-ledger.js', ['--dir', old, '--summary'], noSess).stdout, /1 subagent/, 'old ledger still summarises');
   assert.strictEqual(wf('tpm-workflow-cost-ledger.js', ['--dir', old, '--agent', 'z', '--tokens', '2k'], withSess).status, 0);
-  const up = fs.readFileSync(path.join(old, 'tmp', 'cost-ledger.md'), 'utf8');
+  const up = fs.readFileSync(path.join(old, 'tpm-tmp', 'cost-ledger.md'), 'utf8');
   assert.ok(up.includes('| 2026-01-01 | r | a | b | m | 1,000 | 2 | ok | n |\n'), 'old row untouched');
   assert.match(up, /\| Notes \| Session \|\n/);
   assert.match(wf('tpm-workflow-cost-ledger.js', ['--dir', old, '--summary'], noSess).stdout, /2 subagent/);
@@ -329,7 +329,7 @@ test('W-1 cost ledger: trailing Session column stamped; blank cell with no sessi
 
 test('W-2 signoff token carries tpmSession / tpmSessionVia (lookup, flag), omits both when blank; `session` key not reused', () => {
   const mk = () => { const p = fresh('proj'); fs.mkdirSync(path.join(p, '.claude', 'claude-tpm'), { recursive: true }); return p; };
-  const tok = (p, n) => JSON.parse(fs.readFileSync(path.join(p, 'tmp', 'tpm-signoff', n + '.json'), 'utf8'));
+  const tok = (p, n) => JSON.parse(fs.readFileSync(path.join(p, 'tpm-tmp', 'tpm-signoff', n + '.json'), 'utf8'));
   let p = mk();
   assert.strictEqual(wf('tpm-workflow-signoff.js', ['questions'], withSess, p).status, 0);
   let t = tok(p, 'questions');

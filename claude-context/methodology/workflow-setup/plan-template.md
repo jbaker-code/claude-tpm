@@ -104,11 +104,13 @@ independent of the task-specific list above:
    project-level tools. Skip entirely if you had zero tool friction; otherwise bias toward logging.
 <!-- end config-gated: workflow.deliverables.toolFeedback -->
 
-**Durable vs disposable — `findings/` is saved, `tmp/` is deleted.** Everything under `findings/` is a git-saved
-artifact this round is accountable for; **everything under `tmp/` WILL BE DELETED after review.** Put all
-scratch, intermediates, and verification handoff material under `tmp/` (your env dump → `tmp/worker-env.md`);
-never invent scratch homes inside `findings/`. If a `tmp/` file turns out to be load-bearing for a claim, move
+**Durable vs disposable — `findings/` is saved, `tpm-tmp/` is deleted.** Everything under `findings/` is a git-saved
+artifact this round is accountable for; **everything under `tpm-tmp/` WILL BE DELETED after review.** Put all
+scratch, intermediates, and verification handoff material under `tpm-tmp/` (your env dump → `tpm-tmp/worker-env.md`);
+never invent scratch homes inside `findings/`. If a `tpm-tmp/` file turns out to be load-bearing for a claim, move
 it into `findings/` before you return — prose about deleted evidence is not evidence.
+
+The scratch folder is named by `workflow.folders.tmp` (default `tpm-tmp`); the composer emits the resolved name in the spawn prompt, so `tpm-tmp/` here is the default, not a hardcoded contract.
 
 ## Constraints
 

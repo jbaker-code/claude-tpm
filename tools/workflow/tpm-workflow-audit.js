@@ -49,6 +49,8 @@
 
 const fs = require('fs');
 const path = require('path');
+// #1183: devDir + the subfolder names (tmp/findings/tools/tests) come from the resolved workflow config.
+const configResolver = require('./tpm-workflow-config-resolver.js');
 
 const argv = process.argv.slice(2);
 let OUT_PATH = null;
@@ -72,18 +74,22 @@ if (!OUT_PATH) {
   process.exit(1);
 }
 
-const ROOT = TASKS_ROOT_ARG || 'dev';
+let WF;
+try { WF = configResolver.resolveConfig(undefined, {}).resolved; }
+catch (_e) { WF = configResolver.getDefaults(); }
+const F = WF.folders;
+const ROOT = TASKS_ROOT_ARG || WF.devDir;
 
 // --- shared layout constants (from the legacy tool) ---------------------------
 // Internal dirs a leaf owns — don't recurse into these looking for sub-tasks.
-const INTERNAL_DIRS = ['findings', 'tools', 'assets', 'tmp', 'tests'];
+const INTERNAL_DIRS = [F.findings, F.tools, 'assets', F.tmp, F.tests];
 // Allowed entries directly at a task root.
-const ROOT_SPEC = ['plan.md', 'README.md', 'assets', 'tools', 'findings', 'tmp', 'tests'];
+const ROOT_SPEC = ['plan.md', 'README.md', 'assets', F.tools, F.findings, F.tmp, F.tests];
 // Recognized standard dirs inside findings/ (durable). `docs` is the legacy
 // pre-2026-07-07 numbered-docs subfolder, still valid where present.
 const FINDINGS_STD_DIRS = ['deliverables', 'verification', 'captures', 'docs'];
-// Scratch-shaped dirs that must NOT live under findings/ (belong in task tmp/).
-const FINDINGS_SCRATCH_DIRS = ['tmp', 'scratch', 'research'];
+// Scratch-shaped dirs that must NOT live under findings/ (belong in the task's scratch folder, F.tmp).
+const FINDINGS_SCRATCH_DIRS = [F.tmp, 'scratch', 'research'];
 
 // --- epic constants -----------------------------------------------------------
 const EPIC_PLAN_DIR = '00-epic-plan';
@@ -110,7 +116,7 @@ function listFlat(dir) {
 }
 
 function isLeaf(dir) {
-  return ['findings', 'tools', 'plan.md', 'README.md'].some(p => fs.existsSync(path.join(dir, p)));
+  return [F.findings, F.tools, 'plan.md', 'README.md'].some(p => fs.existsSync(path.join(dir, p)));
 }
 
 function isEpic(dir) {
@@ -151,7 +157,7 @@ function classifyRootEntry(name, isDir) {
 }
 
 function checkFindings(taskDir) {
-  const findings = path.join(taskDir, 'findings');
+  const findings = path.join(taskDir, F.findings);
   if (!fs.existsSync(findings)) return { exists: false };
   const r = {
     exists: true, hasReadme: false, hasQuestions: false, hasHandoff: false,
@@ -256,9 +262,9 @@ function auditFlatLeaf(leaf) {
     plan: top.some(e => e.name === 'plan.md'),
     readme: top.some(e => e.name === 'README.md'),
     assets: top.some(e => e.isDir && e.name === 'assets'),
-    tools: top.some(e => e.isDir && e.name === 'tools'),
-    findings: top.some(e => e.isDir && e.name === 'findings'),
-    tmp: top.some(e => e.isDir && e.name === 'tmp'),
+    tools: top.some(e => e.isDir && e.name === F.tools),
+    findings: top.some(e => e.isDir && e.name === F.findings),
+    tmp: top.some(e => e.isDir && e.name === F.tmp),
   };
   const f = checkFindings(leaf);
   const stray = top.filter(e => !['spec', 'spec-variant-readme', 'spec-variant-plan',
@@ -271,7 +277,7 @@ function auditFlatLeaf(leaf) {
     log('- findings/: README=' + (f.hasReadme ? '✓' : '-') + ' questions=' + (f.hasQuestions ? '✓' : '-') +
         ' HANDOFF=' + (f.hasHandoff ? '✓' : '-') +
         (f.stdDirs.length ? ' | subdirs: ' + f.stdDirs.map(s => '`' + s + '/`').join(', ') : ''));
-    if (f.scratchDirs.length) log('- ⚠ scratch dirs inside findings/ (move to task `tmp/`): ' + f.scratchDirs.map(s => '`' + s + '/`').join(', '));
+    if (f.scratchDirs.length) log('- ⚠ scratch dirs inside findings/ (move to task `' + F.tmp + '/`): ' + f.scratchDirs.map(s => '`' + s + '/`').join(', '));
     if (f.unexpectedDirs.length) log('- unexpected dirs under findings/: ' + f.unexpectedDirs.map(s => '`' + s + '/`').join(', '));
   }
   if (stray.length) {

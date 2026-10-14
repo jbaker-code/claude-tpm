@@ -38,13 +38,13 @@ Disaster scenarios and their methodology-level recovery paths. **Applies to any 
 
 **Recovery:** The generator is deterministic. Re-run it with the same inputs documented in the task's `findings/README.md`. MD5 of the rebuilt output should match what was previously documented; if it doesn't, one of the inputs is stale — chase that down before trusting the rebuild.
 
-If the generator's inputs themselves are lost: rebuild from canonical source (`dev/<task>/tmp/`).
+If the generator's inputs themselves are lost: rebuild from canonical source (`dev/<task>/tpm-tmp/`).
 
 ### 2. Working folder accidentally deleted / contents corrupted
 
 **Symptoms:** `dev/<task>/` (or files inside) gone or unreadable.
 
-**Recovery:** Ask the user whether a recoverable snapshot of the folder exists. If not: hope the orchestrator's session log / TaskList has enough breadcrumbs to recover, and check `tmp/` for in-progress artifacts that were copied out before deletion.
+**Recovery:** Ask the user whether a recoverable snapshot of the folder exists. If not: hope the orchestrator's session log / TaskList has enough breadcrumbs to recover, and check `tpm-tmp/` for in-progress artifacts that were copied out before deletion.
 
 **Prevention is the real fix here:** when the orchestrator is doing heavy multi-hour work, periodically ask the user if it's a good time for him to checkpoint a commit. Don't accumulate too much uncommitted state in a single session.
 

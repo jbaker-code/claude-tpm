@@ -20,6 +20,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { getDefaults } = require('../../../tpm-workflow-config-resolver.js');
+const FOLDERS = getDefaults().folders; // #1183: derive expected names from the shipped defaults
 const { mkScratch } = require('../../../../tests/lib/scratch'); // shared: <bundle>/tmp/scratch/<run-slug>/
 
 // The CANONICAL promoted tool — this suite runs against the shipped tool, not a checked-in copy.
@@ -53,8 +55,8 @@ function run(args) {
     '--tokens', '715k', '--calls', '198', '--verdict', 'ACCEPT', '--round', 'phase B']);
   run(['--dir', dir, '--agent', 'v1', '--role', 'verifier', '--model', 'sonnet',
     '--tokens', '1.2m', '--calls', '40', '--verdict', 'PASS']);
-  const ledger = path.join(dir, 'tmp', 'cost-ledger.md');
-  ok(fs.existsSync(ledger), 'ledger written to <dir>/tmp/cost-ledger.md');
+  const ledger = path.join(dir, FOLDERS.tmp, 'cost-ledger.md');
+  ok(fs.existsSync(ledger), 'ledger written to <dir>/<folders.tmp>/cost-ledger.md');
   const body = fs.readFileSync(ledger, 'utf8');
   ok(/\| w1 \|/.test(body) && /\| v1 \|/.test(body), 'both rows present');
 
@@ -75,7 +77,7 @@ function run(args) {
   run(['--epic-path', epic, '--agent', 'orch', '--role', 'orchestrator',
     '--tokens', '40k', '--calls', '12', '--round', 'epic bookkeeping']);
   const epicLedger = path.join(epic, '00-epic-plan', 'cost-ledger.md');
-  const wrongTmp = path.join(epic, 'tmp', 'cost-ledger.md');
+  const wrongTmp = path.join(epic, FOLDERS.tmp, 'cost-ledger.md');
   ok(fs.existsSync(epicLedger), 'epic ledger at <epic>/00-epic-plan/cost-ledger.md');
   ok(!fs.existsSync(wrongTmp), 'epic ledger NOT written to <epic>/tmp/');
   const s = run(['--epic-path', epic, '--summary']);
@@ -140,7 +142,7 @@ function run(args) {
   const dir = mkscratch();
   run(['--dir', dir, '--agent', 'w|x', '--role', 'worker', '--model', 'opus',
     '--tokens', '10k', '--calls', '5', '--note', 'a|b|c']);
-  const ledger = path.join(dir, 'tmp', 'cost-ledger.md');
+  const ledger = path.join(dir, FOLDERS.tmp, 'cost-ledger.md');
   const body = fs.readFileSync(ledger, 'utf8');
   // The note pipes are backslash-escaped in the emitted row (a\|b\|c), NOT raw.
   ok(/a\\\|b\\\|c/.test(body), 'note pipes are backslash-escaped (a\\|b\\|c), not raw');

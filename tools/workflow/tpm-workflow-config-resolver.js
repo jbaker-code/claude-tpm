@@ -197,6 +197,11 @@ function mergeWorkflowConfig(rawWorkflow) {
     resolved.verifyLoopCap = rawWorkflow.verifyLoopCap;
   }
 
+  // #1183: config-only keys (no flag/env rung). devDir replaces; folders shallow-merges so a consumer can
+  // override one folder name (e.g. folders.tmp) and keep the other defaults. Non-string devDir is ignored.
+  if (typeof rawWorkflow.devDir === 'string' && rawWorkflow.devDir) resolved.devDir = rawWorkflow.devDir;
+  resolved.folders = mergeShallow(defaults.folders, rawWorkflow.folders);
+
   resolved.subagentConfigs = mergeByName(defaults.subagentConfigs, rawWorkflow.subagentConfigs);
   resolved.teams = mergeByName(defaults.teams, rawWorkflow.teams);
   resolved.deliverables = mergeShallow(defaults.deliverables, rawWorkflow.deliverables);

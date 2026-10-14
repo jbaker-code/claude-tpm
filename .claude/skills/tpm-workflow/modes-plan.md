@@ -189,8 +189,8 @@ documentarian), or multiple builders. Below that, no epic overhead.
   `plan.md` (**seeded from the config's `planTemplateFile` when one resolves on disk — the scaffolder
   consumes it, phase 24 fix #9; the built-in sentinel stub is only the fallback**), per-role
   `charter-<role>.md` (copied from the resolved `charterFile`), per-role
-  `spawn-prompt-<role>-r1.md` stubs, `findings/ tools/ tests/ tmp/`, and per-subagent
-  `tmp/<role>-r1[-v<M>]/` scratch folders. **Numbered ≠ serial** — `NN` is a stable lineage id; the
+  `spawn-prompt-<role>-r1.md` stubs, `findings/ tools/ tests/ tpm-tmp/`, and per-subagent
+  `tpm-tmp/<role>-r1[-v<M>]/` scratch folders. **Numbered ≠ serial** — `NN` is a stable lineage id; the
   `00-epic-plan/` phase map is the source of truth for order + parallelism.
 - **Flat round:** a single `add-phase`-style folder is fine; a flat `ship` folder holds ONE `plan.md`
   (the builder's) + `charter-builder.md` + `charter-verifier.md` (the verifier reads the same plan's

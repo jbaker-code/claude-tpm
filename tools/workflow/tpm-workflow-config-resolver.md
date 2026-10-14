@@ -90,18 +90,18 @@ With no config (or a partial one), the resolver returns these built-in defaults:
   `retryCount` is the per-agent bail-retry budget — delivery/fix roles (`builder`/`mvp`/`bug-fixer`) get **5**, everyone else **1**.
 - **6 teams** (`teams`, array order = run order): `full` (planning → builder → test-writer → documentarian → verifier), `ship` (builder → verifier), `test` (test-writer → verifier), `docs` (documentarian → verifier), `research` (researcher), `build` (builder).
 - **`verifier`**: `{ requireAllPass: true, multiCountMode: "blind-pair", loopFixer: "bug-fixer" }`. `loopFixer` names the persona the orchestrator spawns to make targeted fixes when a verifier kicks back (convention: the `bug-fixer` persona).
-- `defaultParallelism: "serial"`, `verifyLoopCap: 5`, `deliverables: { tldr, toolFeedback, wiki }` (all true), `planTemplateFile: ""`, `subagentEnvTemplate: ""` (fix #3), `charterVariants: {}`, `costLedger.epicPath: "00-epic-plan/cost-ledger.md"`, `blockedFilenamePatterns: ["report","summary","analysis","findings"]`.
+- `defaultParallelism: "serial"`, `verifyLoopCap: 5`, `deliverables: { tldr, toolFeedback, wiki }` (all true), `planTemplateFile: ""`, `subagentEnvTemplate: ""` (fix #3), `charterVariants: {}`, `costLedger.epicPath: "00-epic-plan/cost-ledger.md"`, `folders: { tmp: "tpm-tmp", findings: "findings", tools: "tools", tests: "tests" }`, `devDir: "dev"` (#1183; see `docs/config-guide.md` §2), `blockedFilenamePatterns: ["report","summary","analysis","findings"]`.
 
 **`planTemplateFile`** (consumed by the scaffolder — fix #9) and **`subagentEnvTemplate`** (fix #3) both
 name a file the scaffolder copies at `add-phase`: the plan-template seeds `plan.md`, the env-template
-seeds each phase's `tmp/subagent.env` (else a comment-only stub). See `scaffold-subagent.md`.
+seeds each phase's `tpm-tmp/subagent.env` (else a comment-only stub). See `scaffold-subagent.md`.
 
 ### Merge rules (config over defaults)
 
 - `subagentConfigs` and `teams` merge **by name** — a matching name overrides its default fields; a new name is appended.
-- `deliverables`, `verifier`, `costLedger`, and each `charterVariants[role]` are **shallow-merged** (config keys override matching default keys; unset keys keep their default).
+- `deliverables`, `verifier`, `costLedger`, `folders`, and each `charterVariants[role]` are **shallow-merged** (config keys override matching default keys; unset keys keep their default).
 - `blockedFilenamePatterns` is **replaced** wholesale by the config's list (not merged).
-- `enabled`, `planTemplateFile`, `subagentEnvTemplate`, `defaultParallelism`, `verifyLoopCap` are scalar overrides.
+- `enabled`, `planTemplateFile`, `subagentEnvTemplate`, `defaultParallelism`, `verifyLoopCap`, `devDir` are scalar overrides (a non-string `devDir` is ignored and the default kept). `folders` and `devDir` are config-only: no flag or env rung.
 
 ## Reusable API
 

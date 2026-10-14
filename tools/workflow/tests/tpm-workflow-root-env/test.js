@@ -47,10 +47,13 @@ let r = run(SIGNOFF, ['questions', '--roster', 'x'], { cwd: sub, e: { TPM_PROJEC
 check(r.code === 0, 'signoff questions (cwd=subfolder, env=proj) exits 0');
 r = run(SIGNOFF, ['spawn', '--round', ROUND, '--roster', 'x'], { cwd: sub, e: { TPM_PROJECT_ROOT: proj } });
 check(r.code === 0, 'signoff spawn (cwd=subfolder, env=proj) exits 0: ' + r.err);
-check(fs.existsSync(path.join(proj, 'tmp', 'tpm-signoff', 'questions.json'))
-  && fs.readdirSync(path.join(proj, 'tmp', 'tpm-signoff')).some((f) => /^spawn-/.test(f)),
-'signoff tokens written under <proj>/tmp/tpm-signoff/');
-check(!fs.existsSync(path.join(sub, 'tmp')), 'no token store created under the subfolder');
+// #1183: questions token stays at the project root (tpm-tmp/); the spawn token is ROUND-scoped under the phase folder.
+check(fs.existsSync(path.join(proj, 'tpm-tmp', 'tpm-signoff', 'questions.json')),
+  'questions token written under <proj>/tpm-tmp/tpm-signoff/');
+check(fs.existsSync(path.join(proj, ROUND, 'tpm-tmp', 'tpm-signoff', 'spawn.json')),
+  'spawn token written under <proj>/<round>/tpm-tmp/tpm-signoff/spawn.json (round-scoped, no hash)');
+check(!fs.existsSync(path.join(proj, 'tmp', 'tpm-signoff')), 'no legacy <proj>/tmp/tpm-signoff store created');
+check(!fs.existsSync(path.join(sub, 'tpm-tmp')) && !fs.existsSync(path.join(sub, 'tmp')), 'no token store created under the subfolder');
 
 // ── gate reader agrees with the writer ──
 // (token is under proj; payload.cwd = subfolder)
@@ -62,7 +65,7 @@ check(r.code === 2, 'gate: no CLAUDE_PROJECT_DIR -> falls back to payload.cwd (s
 r = hook(payload(proj), {});
 check(r.code === 0, 'gate: no CLAUDE_PROJECT_DIR, payload.cwd=proj (has token) -> ALLOW');
 // token only under the subfolder, CLAUDE_PROJECT_DIR=other project w/o token -> BLOCK
-const subStore = path.join(sub, 'tmp', 'tpm-signoff');
+const subStore = path.join(sub, 'tpm-tmp', 'tpm-signoff');
 fs.mkdirSync(subStore, { recursive: true });
 signoff.writeToken('questions', { root: sub });
 signoff.writeToken('spawn', { root: sub, round: ROUND });

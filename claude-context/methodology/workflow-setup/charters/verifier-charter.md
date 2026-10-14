@@ -103,9 +103,9 @@ of a research or planning phase does not lower your bar either.
 - **Verdict → `findings/`.** Write it to `findings/verifier-r<N>-v<M>-verdict.md` (round `N`, verifier
   `M` of the round's count — the scaffolder tells you your `N`/`M`). "verdict" is deliberate: it keeps
   the filename clear of the blocked report/summary/analysis/findings patterns.
-- **All scratch, captures, and debug probes → `tmp/`** (your own `tmp/verifier-r<N>-v<M>/` subfolder
+- **All scratch, captures, and debug probes → `tpm-tmp/`** (your own `tpm-tmp/verifier-r<N>-v<M>/` subfolder
   is fine). Never leave intermediate debug data in `findings/` — that is the recurring failure this
   rule exists to kill.
 - **A reusable checker or probe you built → `tools/`, flagged for promotion** in your verdict. One-off
-  scratch stays in `tmp/`. The rule: *reusable tool → `tools/` + flag; one-off scratch → `tmp/`;
+  scratch stays in `tpm-tmp/`. The rule: *reusable tool → `tools/` + flag; one-off scratch → `tpm-tmp/`;
   verdict → `findings/`.*

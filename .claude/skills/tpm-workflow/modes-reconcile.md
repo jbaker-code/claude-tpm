@@ -24,7 +24,7 @@ After a phase reaches a verified PASS (or accepted partial-with-gap):
    can't introspect its own cumulative tokens — orchestrator-written):
    `tpm workflow cost --epic-path dev/<epic> --agent <id> --role <role>
    --model <m> --tokens <n> --calls <n> --verdict <v> --round <N>`. In an epic the ledger lives at
-   `00-epic-plan/cost-ledger.md`; a flat round keeps `tmp/cost-ledger.md`.
+   `00-epic-plan/cost-ledger.md`; a flat round keeps `tpm-tmp/cost-ledger.md`.
 3. **Update `00-epic-plan/`** — log the decision in `decisions.md` (tag "raise to user" for
    autonomously-made calls), update `punchlist.md` (done / pending / cut), adjust the phase map if
    scope expanded (append-only — a new need is a new numbered phase). `00-epic-plan/` is
@@ -60,8 +60,8 @@ Runs when the deliverable ships AND every `punchlist.md` item is done OR explici
    standing-convention change is a rare, separately user-approved edit, never a routine close step.
 6. **Seal `00-epic-plan/`** — mark complete; the epic records go immutable (like sealed session notes).
 7. **Archive** — the sealed epic stays in `dev/` marked SEALED; a periodic hygiene sweep archives
-   old sealed epics. `tmp/` scratch is NOT swept at close (that's a hygiene step); the per-phase
-   `tmp/unreviewed.md` markers clear once the user reviews.
+   old sealed epics. `tpm-tmp/` scratch is NOT swept at close (that's a hygiene step); the per-phase
+   `tpm-tmp/unreviewed.md` markers clear once the user reviews.
 
 ## Reconcile is where the `write-handoff` job lives
 

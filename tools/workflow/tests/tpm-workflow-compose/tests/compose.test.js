@@ -369,5 +369,22 @@ check('...and the real tool does NOT (guard would fire red on the mutant)',
     JSON.stringify(fs.readdirSync(root).sort()) === JSON.stringify(before) && !fs.existsSync(path.join(root, name)), fs.readdirSync(root).join(','));
 }
 
+// ---------------------------------------------------------------------------
+// #1183: emitted scratch folder is the RESOLVED workflow.folders.tmp (default tpm-tmp), paths stay single-quoted.
+// ---------------------------------------------------------------------------
+{
+  const cwdBase = fs.mkdtempSync(path.join(SCRATCH, 'tmpname-'));
+  r = run(COMPOSE, ['--role', 'builder', '--phase-dir', 'dev/my epic/01-x', '--plan', 'plan.md', '--charter', 'charter-builder.md', '--project-root', cwdBase]);
+  check('#1183 default: step-zero source uses tpm-tmp, single-quoted', r.stdout.includes("source 'dev/my epic/01-x/tpm-tmp/subagent.env'"), r.stdout);
+  check('#1183 default: worker-env uses tpm-tmp, single-quoted', r.stdout.includes("> 'dev/my epic/01-x/tpm-tmp/worker-env.md'"), r.stdout);
+  check('#1183 default: Constraints scratch is tpm-tmp/<slug>/', r.stdout.includes('scratch → `tpm-tmp/builder/`'), r.stdout);
+  fs.mkdirSync(path.join(cwdBase, '.claude', 'claude-tpm'), { recursive: true });
+  fs.writeFileSync(path.join(cwdBase, '.claude', 'claude-tpm', 'config.json'), JSON.stringify({ workflow: { folders: { tmp: 'scratchy' } } }));
+  r = run(COMPOSE, ['--role', 'builder', '--phase-dir', 'dev/my epic/01-x', '--plan', 'plan.md', '--charter', 'charter-builder.md', '--project-root', cwdBase]);
+  check('#1183 configured: step-zero source uses scratchy, single-quoted', r.stdout.includes("source 'dev/my epic/01-x/scratchy/subagent.env'"), r.stdout);
+  check('#1183 configured: worker-env uses scratchy', r.stdout.includes("> 'dev/my epic/01-x/scratchy/worker-env.md'"), r.stdout);
+  check('#1183 configured: Constraints scratch is scratchy/<slug>/', r.stdout.includes('scratch → `scratchy/builder/`'), r.stdout);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

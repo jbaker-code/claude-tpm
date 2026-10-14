@@ -22,6 +22,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { getDefaults } = require('../../../tpm-workflow-config-resolver.js');
+const FOLDERS = getDefaults().folders; // #1183: derive expected names from the shipped defaults
 const { mkScratch } = require('../../../../tests/lib/scratch'); // shared: <bundle>/tmp/scratch/<run-slug>/
 
 // The CANONICAL promoted tool (tools/workflow/tpm-workflow-audit.js) — this suite runs against the
@@ -62,7 +64,7 @@ function cleanPhase(root, name, charters = ['charter-builder.md']) {
   const d = path.join(root, name);
   write(path.join(d, 'plan.md'), '# Plan\n');
   for (const c of charters) write(path.join(d, c), '# Charter\n');
-  mkdir(path.join(d, 'findings'));
+  mkdir(path.join(d, FOLDERS.findings));
 }
 // A clean 00-epic-plan (uses the word "charter" legitimately — must NOT trip).
 function cleanEpicPlan(root) {
@@ -88,7 +90,7 @@ function cleanEpicPlan(root) {
   // a flat task sibling
   const flat = path.join(root, 'flat-task');
   write(path.join(flat, 'plan.md'), '# Plan\n');
-  mkdir(path.join(flat, 'findings'));
+  mkdir(path.join(flat, FOLDERS.findings));
 
   const r = runAudit(root, ['--strict']);
   ok(r.status === 0, `clean tree --strict should exit 0, got ${r.status} (stderr: ${r.stderr})`);
@@ -184,10 +186,10 @@ function cleanEpicPlan(root) {
   const root = mkscratch();
   const flat = path.join(root, 'legacy-task');
   write(path.join(flat, 'plan.md'), '# Plan\n');
-  mkdir(path.join(flat, 'findings'));
-  mkdir(path.join(flat, 'findings', 'tmp'));        // scratch under findings/ -> drift
+  mkdir(path.join(flat, FOLDERS.findings));
+  mkdir(path.join(flat, FOLDERS.findings, FOLDERS.tmp));        // scratch under findings/ -> drift
   write(path.join(flat, 'stray-note.md'), 'x');     // stray md at task root
-  write(path.join(flat, 'findings', '01-result.md'), 'ok'); // legit findings file (not flagged)
+  write(path.join(flat, FOLDERS.findings, '01-result.md'), 'ok'); // legit findings file (not flagged)
 
   const r = runAudit(root);
   ok(r.status === 0, `legacy audit runs (exit ${r.status})`);
@@ -243,7 +245,7 @@ function cleanEpicPlan(root) {
   const p = path.join(epic, '01-drift');
   write(path.join(p, 'plan.md'), '# Plan\n');
   write(path.join(p, 'charter-builder.md'), '# Charter\n');
-  mkdir(path.join(p, 'findings', 'tmp')); // scratch under findings/ -> drift
+  mkdir(path.join(p, FOLDERS.findings, FOLDERS.tmp)); // scratch under findings/ -> drift
   const r = runAudit(root, ['--strict']);
   ok(r.status === 3, `epic-phase findings-scratch --strict should exit 3, got ${r.status}`);
   ok(/phase `01-drift` has scratch dir\(s\) inside findings\//.test(r.report),

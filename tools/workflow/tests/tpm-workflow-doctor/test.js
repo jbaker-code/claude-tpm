@@ -33,6 +33,18 @@ check('checkCompose: composed prompt carries the bare `tpm resolve-home` anchor 
   assert.strictEqual(r.ok, true, r.detail + ' ' + (r.fix || ''));
   assert.ok(/resolve-home anchor/.test(r.detail), r.detail);
 });
+check('checkSignoffWritable: probes <root>/tpm-tmp/tpm-signoff (#1183), not the legacy tmp/ store', () => {
+  const fs = require('fs'); const os = require('os'); const path = require('path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doctor signoff ')); // space in the path on purpose
+  try {
+    const r = doctor.checkSignoffWritable(root);
+    assert.strictEqual(r.ok, true, r.detail);
+    assert.ok(/tpm-tmp\/tpm-signoff/.test(r.detail), r.detail);
+    assert.ok(fs.existsSync(path.join(root, 'tpm-tmp', 'tpm-signoff')), 'store dir created at tpm-tmp/tpm-signoff');
+    assert.ok(!fs.existsSync(path.join(root, 'tmp')), 'no legacy tmp/ created');
+    assert.ok(!fs.existsSync(path.join(root, 'tpm-tmp', 'tpm-signoff', '.doctor-probe')), 'probe cleaned up');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
 check('every FAIL result carries a fix (fail-loud contract)', () => {
   const r = doctor.checkSignoffWritable('/dev/null'); // mkdir under a non-directory → guaranteed FAIL
   assert.strictEqual(r.ok, false);

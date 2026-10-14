@@ -13,7 +13,7 @@ authority funnels **orchestrator → and the orchestrator clears the kickoff wit
 
 1. **`tpm workflow scaffold`** `add-phase` / `add-round` — creates the phase work folder: per-role
    `charter-<role>.md` (copied from its config `charterFile` home, orchestrator-note **stripped**), a
-   `spawn-prompt-<role>-r<N>.md` stub, `tmp/<role>-r<N>/`, and a `subagent.env` stub. Uses `--team` (the roster)
+   `spawn-prompt-<role>-r<N>.md` stub, `tpm-tmp/<role>-r<N>/`, and a `subagent.env` stub. Uses `--team` (the roster)
    or `--charter <path>` (a specific charter).
 2. **`tpm workflow compose`** — emit the standard prompt: env step-zero, role-conditional read-order +
    return-shape (a planner is told *don't build*; a verifier *verdict-not-repair*; a bug-fixer *fix the verdict's

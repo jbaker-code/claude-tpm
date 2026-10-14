@@ -18,13 +18,15 @@ Before anything else — before reading a single doc — every subagent runs the
 
 ```bash
 cd "<ABSOLUTE_PROJECT_ROOT>" && \
-  set -a && source "dev/<your-task>/tmp/subagent.env" && set +a && \
-  env | sort > "dev/<your-task>/tmp/worker-env.md"
+  set -a && source "dev/<your-task>/tpm-tmp/subagent.env" && set +a && \
+  env | sort > "dev/<your-task>/tpm-tmp/worker-env.md"
 ```
 
 **Substitute `<your-task>`** with your actual task path (from your spawn prompt's "Working folder" line). The example above shows `dev/<your-task>/` — one real invocation might be `dev/tooling/tmptest1/`.
 
-**Dump filename by role:** workers write `tmp/worker-env.md`; verifiers write `tmp/verifier<N>-env.md` using the verifier number from their spawn prompt (e.g. `tmp/verifier5-env.md`). Both live in the task's `tmp/` — they are diagnostics, not findings, and **everything under the task's `tmp/` will be deleted and lost after the round is reviewed.**
+**The scratch folder name is configurable.** `tpm-tmp` is the default of `workflow.folders.tmp`; the composer emits the resolved name in your spawn prompt, so treat the `tpm-tmp/` paths in these docs as illustrative and use the one your prompt gives you.
+
+**Dump filename by role:** workers write `tpm-tmp/worker-env.md`; verifiers write `tpm-tmp/verifier<N>-env.md` using the verifier number from their spawn prompt (e.g. `tpm-tmp/verifier5-env.md`). Both live in the task's `tpm-tmp/` — they are diagnostics, not findings, and **everything under the task's `tpm-tmp/` will be deleted and lost after the round is reviewed.**
 
 **Two rules that trip subagents:**
 
@@ -38,11 +40,11 @@ The project root is `<ABSOLUTE_PROJECT_ROOT>` — run `pwd` in a Bash call to ge
 
 **Why universally, even for tasks with no live system in scope:**
 
-- `tmp/subagent.env` is the project's per-subagent env-setup mechanism. It's dropped by the scaffolder on every scaffold — even when no live system is provisioned, a stub file is present, so `source` is always safe.
+- `tpm-tmp/subagent.env` is the project's per-subagent env-setup mechanism. It's dropped by the scaffolder on every scaffold — even when no live system is provisioned, a stub file is present, so `source` is always safe.
 - Sourcing FIRST means any project env vars are in scope by the time you touch a tool. Skipping the source because "my task doesn't use the live system" was a real failure mode: one of three parallel subagents read "no live system work" strictly and didn't source, producing a divergent env dump. This ritual removes that ambiguity: source unconditionally.
-- Dumping `env` to `tmp/worker-env.md` (or `tmp/verifier<N>-env.md`) is a diagnostic artifact — the orchestrator (and future-you) can see exactly what env the subagent operated under. Trivial to write; invaluable when debugging "why didn't your tool call work?" or "why did you use the wrong endpoint?"
+- Dumping `env` to `tpm-tmp/worker-env.md` (or `tpm-tmp/verifier<N>-env.md`) is a diagnostic artifact — the orchestrator (and future-you) can see exactly what env the subagent operated under. Trivial to write; invaluable when debugging "why didn't your tool call work?" or "why did you use the wrong endpoint?"
 
-**When `tmp/subagent.env` is a stub** (no live-system flags at scaffold time): `source` still works, the env dump still lands, no project-specific vars appear. That's the expected state when your round doesn't need a live system; nothing is broken. If a subagent later needs live-system access, the orchestrator re-scaffolds with the project's live-system flags and the env file gets replaced.
+**When `tpm-tmp/subagent.env` is a stub** (no live-system flags at scaffold time): `source` still works, the env dump still lands, no project-specific vars appear. That's the expected state when your round doesn't need a live system; nothing is broken. If a subagent later needs live-system access, the orchestrator re-scaffolds with the project's live-system flags and the env file gets replaced.
 
 ---
 
@@ -83,11 +85,11 @@ Key things to know without re-reading:
 
 ## Live-system access — summary
 
-**Access to a live system under test is per-project — this library ships no canonical live-system doc.** If your project has a live SUT, its operational reference is project-specific (a consumer supplement, or the project's own docs). The signal that you have access is a non-stub `tmp/subagent.env` in your task folder; the orchestrator provisions it.
+**Access to a live system under test is per-project — this library ships no canonical live-system doc.** If your project has a live SUT, its operational reference is project-specific (a consumer supplement, or the project's own docs). The signal that you have access is a non-stub `tpm-tmp/subagent.env` in your task folder; the orchestrator provisions it.
 
 Two rules hold regardless of project:
 
-- **No real `tmp/subagent.env` = no live-system work.** If you need live data you can't get, write the verification step into `findings/questions.md`, mark the affected findings `STATUS: UNVERIFIED — pending live check`, and move on. Do not reach for live-system access you weren't granted.
+- **No real `tpm-tmp/subagent.env` = no live-system work.** If you need live data you can't get, write the verification step into `findings/questions.md`, mark the affected findings `STATUS: UNVERIFIED — pending live check`, and move on. Do not reach for live-system access you weren't granted.
 - **Verification subagents exercise the artifact, but NEVER mutate or repair what they check.** Independence = render a *verdict*, not a repair (see [`../verification.md`](../verification.md)). A verifier actively drives the artifact with whatever tools/MCP the round provides to *observe* its real behaviour — but it never patches, rebuilds, or drives the *state it is verifying*: if it can manipulate the state it's checking, PASS becomes "PASS in a state I caused" and the audit trail collapses. If you find yourself wanting to *change* the thing under check rather than observe it, that's a builder/bug-fixer job, not a verifier's — record the gap in `findings/questions.md` and return a FAIL with the exact missing evidence.
 
 ---
@@ -102,7 +104,7 @@ Task-level definition-of-done comes from your `plan.md` (per the pre-task defini
 - **`findings/questions.md` present** — even if empty (a stub file with "No open questions" is fine). Its presence signals you finished the "did anything block me" pass. If you have open questions, they go here with enough detail that the orchestrator can act on them.
 - **`findings/README.md` index updated** — one-line hooks per finding in the order they were written. Reader can scan the index and find what they need.
 - **`findings/HANDOFF.md` written** if you stopped mid-task or your final output has known followup work — see `shared-conventions.md` "Resumption protocol." If you shipped everything, HANDOFF.md is optional; a final findings doc can carry that role.
-- **Live-system artifacts to task folder** — if you had live-system access, any captured artifacts go into your task folder, NOT the session dir: deliverable bundles in `findings/captures/<name>/`, verifier-handoff bundles in `tmp/captures/<name>/`. See the live-system-access rules above.
+- **Live-system artifacts to task folder** — if you had live-system access, any captured artifacts go into your task folder, NOT the session dir: deliverable bundles in `findings/captures/<name>/`, verifier-handoff bundles in `tpm-tmp/captures/<name>/`. See the live-system-access rules above.
 - **Tool feedback logged if any friction hit** — per plan-template.md standing deliverable #5, log every complaint / wish / bug / workaround / dupe-sighting about project-level tools to `findings/tool-feedback.md`. Skip entirely if zero friction this task — no stub required. Low-ceremony sibling to `findings/tool-updates.md` (which stays required only when you actually fork a tool per the tool-modification rule).
 
 Added 2026-07-01 during methodology-review reconciliation (item 9 of the 11 candidate additions).

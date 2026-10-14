@@ -34,6 +34,8 @@ const { execFileSync } = require('child_process');
 const { mkScratch } = require('../../../../../tests/lib/scratch'); // shared: <bundle>/tmp/scratch/<run-slug>/
 
 // The CANONICAL promoted tool at tools/workflow/ (four levels up) — run against the SHIPPED tool.
+const { getDefaults } = require('../../../../tpm-workflow-config-resolver.js');
+const FOLDERS = getDefaults().folders; // #1183: derive expected names from the shipped defaults
 const scaffold = require('../../../../tpm-workflow-scaffold-subagent.js');
 const SCAFFOLD_JS = path.resolve(__dirname, '..', '..', '..', '..', 'tpm-workflow-scaffold-subagent.js');
 
@@ -123,10 +125,10 @@ function main() {
 
   // ── DoD 3: full phase skeleton ───────────────────────────────────────────
   check(isFile(path.join(p1, 'plan.md')), 'phase skeleton: plan.md');
-  check(isDir(path.join(p1, 'findings')), 'phase skeleton: findings/');
+  check(isDir(path.join(p1, FOLDERS.findings)), 'phase skeleton: findings/');
   check(isDir(path.join(p1, 'tools')), 'phase skeleton: tools/');
   check(isDir(path.join(p1, 'tests')), 'phase skeleton: tests/');
-  check(isDir(path.join(p1, 'tmp')), 'phase skeleton: tmp/');
+  check(isDir(path.join(p1, FOLDERS.tmp)), 'phase skeleton: tmp/');
   const planText = fs.readFileSync(path.join(p1, 'plan.md'), 'utf8');
   check(planText.includes('{{DOD}}') && planText.includes('{{MOTIVATION}}'), 'plan.md is a sentinel stub (has {{DOD}}, {{MOTIVATION}})');
   check(!/^## Charter/m.test(planText), 'plan.md carries NO charter/posture (charter is a separate file)');
@@ -143,9 +145,9 @@ function main() {
   // ── DoD 5: per-role spawn-prompt stubs + per-subagent tmp subfolders ─────
   check(isFile(path.join(p1, 'spawn-prompt-builder-r1.md')), 'spawn-prompt-builder-r1.md at phase root');
   check(isFile(path.join(p1, 'spawn-prompt-verifier-r1.md')), 'spawn-prompt-verifier-r1.md at phase root');
-  check(isDir(path.join(p1, 'tmp', 'builder-r1')), 'tmp/builder-r1/ (per-subagent scratch)');
-  check(isDir(path.join(p1, 'tmp', 'verifier-r1-v1')), 'tmp/verifier-r1-v1/ (verifier gets -v<M> suffix)');
-  check(!fs.existsSync(path.join(p1, 'tmp', 'verifier-r1')), 'verifier scratch is -v1 suffixed, not a plain verifier-r1');
+  check(isDir(path.join(p1, FOLDERS.tmp, 'builder-r1')), 'tmp/builder-r1/ (per-subagent scratch)');
+  check(isDir(path.join(p1, FOLDERS.tmp, 'verifier-r1-v1')), 'tmp/verifier-r1-v1/ (verifier gets -v<M> suffix)');
+  check(!fs.existsSync(path.join(p1, FOLDERS.tmp, 'verifier-r1')), 'verifier scratch is -v1 suffixed, not a plain verifier-r1');
 
   // ── DoD 2 (cont.): append-only after a manual 05-x/ → 06 ─────────────────
   fs.mkdirSync(path.join(epicPath, '05-manual-thing'), { recursive: true });
@@ -158,20 +160,20 @@ function main() {
   check(isFile(path.join(ph6.phaseDir, 'charter-builder.md')), 'full: charter-builder.md dropped');
   check(isFile(path.join(ph6.phaseDir, 'charter-verifier.md')), 'full: charter-verifier.md dropped');
   check(isFile(path.join(ph6.phaseDir, 'spawn-prompt-planning-r1.md')), 'full: spawn-prompt-planning-r1.md');
-  check(isDir(path.join(ph6.phaseDir, 'tmp', 'planning-r1')), 'full: tmp/planning-r1/ (planning is single → no -v)');
+  check(isDir(path.join(ph6.phaseDir, FOLDERS.tmp, 'planning-r1')), 'full: tmp/planning-r1/ (planning is single → no -v)');
 
   // ── DoD 6: add-round appends an auto-numbered kickback round ──────────────
   check(scaffold.nextRoundNumber(p1, 'builder') === 2, 'nextRoundNumber(builder) = 2 after r1 exists');
   const rr = scaffold.addRound(p1, { role: 'builder', configPath, startDir: workspace }, commonOpts);
   check(rr.round === 2, `add-round --role builder → r2 (got r${rr.round})`);
   check(isFile(path.join(p1, 'spawn-prompt-builder-r2.md')), 'add-round: spawn-prompt-builder-r2.md');
-  check(isDir(path.join(p1, 'tmp', 'builder-r2')), 'add-round: tmp/builder-r2/');
+  check(isDir(path.join(p1, FOLDERS.tmp, 'builder-r2')), 'add-round: tmp/builder-r2/');
   // a second add-round → r3 (proves the auto-numbering keeps climbing)
   const rr3 = scaffold.addRound(p1, { role: 'builder', configPath, startDir: workspace }, commonOpts);
   check(rr3.round === 3 && isFile(path.join(p1, 'spawn-prompt-builder-r3.md')), 'second add-round → r3');
   // add-round for the verifier gets a -v<M> tmp subfolder
   const rrv = scaffold.addRound(p1, { role: 'verifier', configPath, startDir: workspace }, commonOpts);
-  check(isDir(path.join(p1, 'tmp', `verifier-r${rrv.round}-v1`)), 'add-round verifier → tmp/verifier-r<N>-v1/');
+  check(isDir(path.join(p1, FOLDERS.tmp, `verifier-r${rrv.round}-v1`)), 'add-round verifier → tmp/verifier-r<N>-v1/');
 
   // ── bug-fixer loop naming: add-round --role bug-fixer ─────────────────────
   // The verify↔bug-fixer loop's fixer is in no team roster, so it joins via add-round.
@@ -181,13 +183,13 @@ function main() {
   const bf = scaffold.addRound(p1, { role: 'bug-fixer', configPath, startDir: workspace }, commonOpts);
   check(bf.round === 1, `add-round --role bug-fixer → r1 (fresh role in this phase; got r${bf.round})`);
   check(isFile(path.join(p1, 'spawn-prompt-bug-fixer-r1.md')), 'add-round bug-fixer: spawn-prompt-bug-fixer-r1.md');
-  check(isDir(path.join(p1, 'tmp', 'bug-fixer-r1')), 'add-round bug-fixer: tmp/bug-fixer-r1/ (plain -r<N>, no -v<M>)');
-  check(!fs.existsSync(path.join(p1, 'tmp', 'bug-fixer-r1-v1')), 'bug-fixer scratch is NOT -v suffixed (single fixer, not a blind pair)');
+  check(isDir(path.join(p1, FOLDERS.tmp, 'bug-fixer-r1')), 'add-round bug-fixer: tmp/bug-fixer-r1/ (plain -r<N>, no -v<M>)');
+  check(!fs.existsSync(path.join(p1, FOLDERS.tmp, 'bug-fixer-r1-v1')), 'bug-fixer scratch is NOT -v suffixed (single fixer, not a blind pair)');
   check(isFile(path.join(p1, 'charter-bug-fixer.md')), 'add-round bug-fixer: charter-bug-fixer.md dropped (loop fixer is in no roster)');
   check(bf.charterNote && bf.charterNote.role === 'bug-fixer', 'add-round returns a charterNote for the dropped bug-fixer charter');
   // a second bug-fixer round → r2 scratch, and the existing charter is NOT clobbered
   const bf2 = scaffold.addRound(p1, { role: 'bug-fixer', configPath, startDir: workspace }, commonOpts);
-  check(bf2.round === 2 && isDir(path.join(p1, 'tmp', 'bug-fixer-r2')), 'second bug-fixer round → tmp/bug-fixer-r2/');
+  check(bf2.round === 2 && isDir(path.join(p1, FOLDERS.tmp, 'bug-fixer-r2')), 'second bug-fixer round → tmp/bug-fixer-r2/');
   check(bf2.charterNote === null, 'second bug-fixer round does NOT re-drop the charter (already present)');
 
   // ── add-round for a roster role keeps its add-phase charter (no clobber) ───
@@ -239,7 +241,7 @@ function main() {
   check(!/ORCHESTRATOR NOTE/.test(fs.readFileSync(upOut, 'utf8')), 'fix #6: UPPERCASE note still stripped (regression)');
 
   // ── fix #3: add-phase drops a comment-only tmp/subagent.env stub ──────────────
-  const envStub = path.join(p1, 'tmp', 'subagent.env');
+  const envStub = path.join(p1, FOLDERS.tmp, 'subagent.env');
   check(isFile(envStub), 'fix #3: add-phase drops tmp/subagent.env');
   const envStubTxt = fs.readFileSync(envStub, 'utf8');
   check(/comment-only STUB/i.test(envStubTxt), 'fix #3: the env stub is the comment-only stub');
@@ -264,7 +266,7 @@ function main() {
   const envEpic = path.join(workspace, 'env-epic');
   scaffold.epicInit(envEpic, commonOpts);
   const envPh = addPhase(envEpic, { slug: 'emu', team: 'ship', configPath: envConfigPath, startDir: workspace }, commonOpts);
-  const envCopied = fs.readFileSync(path.join(envPh.phaseDir, 'tmp', 'subagent.env'), 'utf8');
+  const envCopied = fs.readFileSync(path.join(envPh.phaseDir, FOLDERS.tmp, 'subagent.env'), 'utf8');
   check(envCopied === '# emulator env (consumer override)\nEMU_HOST=127.0.0.1\nEMU_PORT=9099\n',
     'fix #3: subagentEnvTemplate override is copied verbatim (the emulator-env hook)');
   check(envPh.envNote && envPh.envNote.fromTemplate === true && envPh.envNote.via === 'config',
@@ -457,8 +459,8 @@ function main() {
     check(isFile(path.join(cliEpic, '00-epic-plan', 'epic-plan.md')), 'CLI epic-init end-to-end produces 00-epic-plan/epic-plan.md');
     execFileSync('node', [SCAFFOLD_JS, 'add-phase', cliEpic, '--slug', 'go', '--team', 'ship', '--config', configPath, '--pretask-ack', ackFile, '--quiet'],
       { encoding: 'utf8', cwd: workspace });
-    check(isDir(path.join(cliEpic, '01-go', 'tmp', 'verifier-r1-v1')), 'CLI add-phase end-to-end produces 01-go/tmp/verifier-r1-v1/');
-    check(isFile(path.join(cliEpic, '01-go', 'tmp', 'subagent.env')), 'CLI add-phase drops tmp/subagent.env (fix #3, end-to-end)');
+    check(isDir(path.join(cliEpic, '01-go', FOLDERS.tmp, 'verifier-r1-v1')), 'CLI add-phase end-to-end produces 01-go/tmp/verifier-r1-v1/');
+    check(isFile(path.join(cliEpic, '01-go', FOLDERS.tmp, 'subagent.env')), 'CLI add-phase drops tmp/subagent.env (fix #3, end-to-end)');
     // CLI --charter (fix #5): the flag is parsed and routed to the named role.
     const cliMvp = path.join(workspace, 'cli-mvp-charter.md');
     fs.writeFileSync(cliMvp, '# Charter — mvp\n\nMVP via CLI flag.\n');
@@ -478,6 +480,26 @@ function main() {
   try { execFileSync('node', [SCAFFOLD_JS, 'bogus'], { encoding: 'utf8', stdio: 'pipe' }); }
   catch (e) { cliBadExit = e.status; }
   check(cliBadExit === 2, 'CLI unknown subcommand exits 2');
+
+  // ── #1183: resolveBase (bare name -> devDir; separator/absolute -> as-is) ─────────────────
+  const rb = scaffold.resolveBase;
+  check(rb('my-epic', 'dev') === path.join('dev', 'my-epic'), 'resolveBase: bare name + devDir "dev" -> dev/my-epic');
+  check(rb('my-epic', 'docs/plans') === path.join('docs/plans', 'my-epic'), 'resolveBase: bare name + custom devDir -> docs/plans/my-epic');
+  check(rb('dev/x', 'docs') === 'dev/x', 'resolveBase: dev/x honored as-is (no double-prefix)');
+  check(rb('sub/x', 'docs') === 'sub/x', 'resolveBase: sub/x honored as-is');
+  check(rb('/abs/x', 'docs') === '/abs/x', 'resolveBase: absolute honored as-is');
+  check(rb('a\\b', 'docs') === 'a\\b', 'resolveBase: backslash path honored as-is');
+  check(rb('x') === path.join('dev', 'x'), 'resolveBase: devDir omitted -> shipped default "dev"');
+  try {
+    const rbWs = path.join(workspace, 'resolvebase-cli');
+    fs.mkdirSync(rbWs, { recursive: true });
+    const rbCfg = path.join(rbWs, 'config.json');
+    fs.writeFileSync(rbCfg, JSON.stringify({ workflow: { devDir: 'mydev' } }));
+    execFileSync('node', [SCAFFOLD_JS, 'epic-init', 'bare-epic', '--config', rbCfg, '--quiet'], { encoding: 'utf8', cwd: rbWs, stdio: 'pipe' });
+    check(isDir(path.join(rbWs, 'mydev', 'bare-epic', '00-epic-plan')), 'CLI epic-init <bare> lands under configured devDir (mydev/bare-epic)');
+    execFileSync('node', [SCAFFOLD_JS, 'epic-init', 'dev/sep-epic', '--config', rbCfg, '--quiet'], { encoding: 'utf8', cwd: rbWs, stdio: 'pipe' });
+    check(isDir(path.join(rbWs, 'dev', 'sep-epic', '00-epic-plan')) && !isDir(path.join(rbWs, 'mydev', 'dev')), 'CLI epic-init dev/<epic> honored as-is (no double-prefix)');
+  } catch (e) { check(false, `resolveBase CLI failed: ${e.message}`); }
 
   // ── report ───────────────────────────────────────────────────────────────
   process.stdout.write(`\n${failures.length ? 'FAIL' : 'PASS'} — ${passed} checks passed, ${failures.length} failed\n`);

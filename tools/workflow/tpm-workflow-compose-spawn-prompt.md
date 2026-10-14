@@ -135,9 +135,11 @@ The four required flags have no defaults — omit one and it fails loudly with e
 ### The identity slug
 
 `<role>-r<N>[-v<M>]`, falling back to `<role>` when no round is given. It drives the scratch
-folder (`tmp/<slug>/`) and, for a verifier, the verdict filename
+folder (`tpm-tmp/<slug>/`) and, for a verifier, the verdict filename
 (`findings/<slug>-verdict.md`). Verified: `--role verifier --round 1 --variant 2` →
-`tmp/verifier-r1-v2/` and `findings/verifier-r1-v2-verdict.md`.
+`tpm-tmp/verifier-r1-v2/` and `findings/verifier-r1-v2-verdict.md`.
+
+**The scratch folder name is configurable (#1183).** `tpm-tmp` is the default of `workflow.folders.tmp` (see `docs/config-guide.md` §2). The composer reads that key from the project config at `--project-root` and uses it in all three places it names the scratch folder: the step-zero `source '<phase>/<tmp>/subagent.env'` line, the `> '<phase>/<tmp>/worker-env.md'` line, and the Constraints `scratch → <tmp>/<slug>/` line. With `{"workflow":{"folders":{"tmp":"scratchy"}}}` in `<root>/.claude/claude-tpm/config.json`, all three read `scratchy`. A missing or malformed config falls back to `tpm-tmp`; it never errors. The step-zero paths stay single-quoted (they can contain spaces).
 
 ---
 
@@ -176,7 +178,7 @@ Read, in order:
 Task for this round:
 {{TASK_CONTEXT}}
 
-Constraints: write ONLY inside the working folder above; zero external deps; portable `node <file>`; scratch → `tmp/builder/`; never name a file report/summary/analysis/findings (server-side blocked).
+Constraints: write ONLY inside the working folder above; zero external deps; portable `node <file>`; scratch → `tpm-tmp/builder/`; never name a file report/summary/analysis/findings (server-side blocked).
 
 Return-shape: your deliverable = the built artifact + its passing checks on disk, plus `findings/HANDOFF.md`. Return a one-paragraph summary: what landed, the exact commands you ran + their results, the `findings/HANDOFF.md` path, and any caveat.
 ```
@@ -204,7 +206,7 @@ Read, in order:
 Task for this round:
 {{TASK_CONTEXT}}
 
-Constraints: write ONLY inside the working folder above; zero external deps; portable `node <file>`; scratch → `tmp/bug-fixer/`; never name a file report/summary/analysis/findings (server-side blocked).
+Constraints: write ONLY inside the working folder above; zero external deps; portable `node <file>`; scratch → `tpm-tmp/bug-fixer/`; never name a file report/summary/analysis/findings (server-side blocked).
 
 Return-shape: your deliverable = the targeted fixes on the real artifact + re-run evidence that each verdict finding is closed, on disk, plus `findings/HANDOFF.md`. Touch nothing beyond the verdict's findings. `findings/HANDOFF.md` already holds the prior agents' content: ADD your own section headed `## Bug-fixer r<N>` at the END of it and leave everything above untouched - never overwrite or rewrite the existing HANDOFF (if none exists yet, create it). Return a one-paragraph summary: each finding and how you closed it, the exact commands you ran + their results, the `findings/HANDOFF.md` path, and any caveat.
 ```
@@ -220,7 +222,7 @@ tpm workflow compose --role verifier --phase-dir 'dev/epic/01-thing' \
 ```
 stderr: `Wrote spawn prompt to /abs/root/dev/epic/01-thing/composed-verifier.md` (the bare `--out` name resolved into the phase folder). The file contains the header
 `You are a VERIFIER subagent of the demo epic.`, the env-source ritual block anchored at
-`cd '/abs/root'`, the `tmp/verifier-r1-v2/` scratch folder, the verifier return-shape
+`cd '/abs/root'`, the `tpm-tmp/verifier-r1-v2/` scratch folder, the verifier return-shape
 (`your verdict to \`findings/verifier-r1-v2-verdict.md\` …`), and the trailing
 `(Model for this spawn: opus — set it on the Agent call.)`.
 

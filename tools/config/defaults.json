@@ -102,6 +102,13 @@
     "costLedger": {
       "epicPath": "00-epic-plan/cost-ledger.md"
     },
+    "devDir": "dev",
+    "folders": {
+      "tmp": "tpm-tmp",
+      "findings": "findings",
+      "tools": "tools",
+      "tests": "tests"
+    },
     "blockedFilenamePatterns": ["report", "summary", "analysis", "findings"]
   },
   "hygiene": {

@@ -105,25 +105,25 @@ transformation, or a parsed table — verification is REQUIRED before the task i
 
 ## Where verification files live — durable vs disposable
 
-A task folder splits into `findings/` (durable — kept) and `tmp/` (**disposable — everything under it will be
+A task folder splits into `findings/` (durable — kept) and `tpm-tmp/` (**disposable — everything under it will be
 deleted and lost after the round is reviewed**). Verification work straddles that line, so placement is
 explicit:
 
 | Thing | Location | Lifecycle |
 |---|---|---|
-| Evidence produced FOR a downstream check (capture bundles, captured evidence) | task `tmp/captures/`, `tmp/verification/` | disposable |
-| Verifier scratch (intermediate diffs, exploratory renders, working notes) | task `tmp/verification/` | disposable |
-| Env dump | task `tmp/worker-env.md` / `tmp/verifier<N>-env.md` | disposable |
+| Evidence produced FOR a downstream check (capture bundles, captured evidence) | task `tpm-tmp/captures/`, `tpm-tmp/verification/` | disposable |
+| Verifier scratch (intermediate diffs, exploratory renders, working notes) | task `tpm-tmp/verification/` | disposable |
+| Env dump | task `tpm-tmp/worker-env.md` / `tpm-tmp/verifier<N>-env.md` | disposable |
 | A verifier's verdict / findings | `findings/` (per your folder-hygiene rule) | durable |
 | Proof-of-claim evidence the round ships (final before/after captures, the decisive diff) | `findings/verification/` | durable |
 | Capture bundles the plan names as deliverables | `findings/captures/` | durable |
 
 Two consequences of the split:
 
-- **A verdict must never point at a `tmp/` path as its lasting evidence.** If an artifact is load-bearing for
+- **A verdict must never point at a `tpm-tmp/` path as its lasting evidence.** If an artifact is load-bearing for
   a PASS or FAIL — the key capture, the decisive diff — copy it into `findings/` before you return. Per the
   lost-step HARD RULE, prose about evidence that has been deleted is not evidence.
-- **Handoff evidence flows through `tmp/`**, and a check reads from those `tmp/` paths. That is fine *during*
+- **Handoff evidence flows through `tpm-tmp/`**, and a check reads from those `tpm-tmp/` paths. That is fine *during*
   the round — the deletion happens after review, not mid-round.
 
 ---
@@ -257,7 +257,7 @@ hard to undo. `findings/decisions.md` is the first place the user looks when aud
 - [`./shared-conventions.md`](./shared-conventions.md) — shared workflow conventions.
 - [`./tool-conventions.md`](./tool-conventions.md) — how you build and reuse the tools your evidence depends
   on; the reproducibility bar above is enforced by shipping deliverables AS re-runnable tools.
-- [`./project-workspace.md`](./project-workspace.md) — read/write boundaries; where `findings/` vs `tmp/`
+- [`./project-workspace.md`](./project-workspace.md) — read/write boundaries; where `findings/` vs `tpm-tmp/`
   live.
 - [`./troubleshooting.md`](./troubleshooting.md) — what to try when a verification keeps failing, plus
   disaster recovery (including recovering a clobbered deterministic output from its committed generator).

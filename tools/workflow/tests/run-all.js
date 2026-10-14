@@ -47,6 +47,7 @@ const SUITES = [
   'tpm-workflow-signoff-gate/test.js',
   'tpm-workflow-root-env/test.js',
   'tpm-workflow-attribution/test.js',
+  'tpm-workflow-config-override-e2e/test.js', // #1183 whole-chain config-override smoke
 ];
 
 function main() {

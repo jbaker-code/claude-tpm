@@ -63,7 +63,7 @@ Reference the tools by their promoted path (`%TPM_HOME%/tools/workflow/…`); a 
    (`add-phase` for a new phase, `add-round --role <role>` to append a kickback round in an existing
    phase — the tool auto-numbers the phase `NN` / round `r<N>` and drops the skeleton: `plan.md`
    stub, `charter-<role>.md` copied from the resolved `charterFile`, `spawn-prompt-<role>-r<N>.md`,
-   `findings/ tools/ tests/ tmp/`, and the per-subagent `tmp/<role>-r<N>[-v<M>]/` scratch folder).
+   `findings/ tools/ tests/ tpm-tmp/`, and the per-subagent `tpm-tmp/<role>-r<N>[-v<M>]/` scratch folder).
    The role's charter + model come from the resolved config (`tpm workflow config`).
 2. **Fill `plan.md`** — pure structure (DoD triple table · task/method · Tools & MCP · curated
    Context · deliverables · constraints · budget). No posture — that's the charter file.

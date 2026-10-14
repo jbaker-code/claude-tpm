@@ -105,6 +105,15 @@ subagent models, and team shapes **without forking TPM**.
   "planTemplateFile": "",           // child's own plan-template (relative to project root); "" = TPM default
   "subagentEnvTemplate": "",        // child's own subagent.env template (relative to project root); "" = TPM default
 
+  // --- folder names + epic base (#1183) ---
+  "folders": {                      // the per-phase subfolder names. Shallow-merged: set only the ones you rename.
+    "tmp": "tpm-tmp",               //   scratch folder (was a literal `tmp/` before #1183)
+    "findings": "findings",
+    "tools": "tools",
+    "tests": "tests"
+  },
+  "devDir": "dev",                  // where a BARE epic name lands: `epic-init foo` -> `<devDir>/foo`
+
   // Per subagent TYPE: its default model + its charter. The 7 TPM-shipped types ship with defaults pointing at
   // their promoted charter homes (workflow-setup/charters/); listing one here OVERRIDES it. A new name APPENDS a type.
   "subagentConfigs": [
@@ -147,10 +156,33 @@ subagent models, and team shapes **without forking TPM**.
     "multiCountMode": "blind-pair", // blind-pair (redundant, catches flakiness) | scoped-lenses (different focuses)
     "loopFixer": "bug-fixer"        // the persona the verify↔bug-fixer loop spawns on a FAIL
   },
-  "costLedger": { "epicPath": "00-epic-plan/cost-ledger.md" },  // epic-level ledger, outside swept tmp/
+  "costLedger": { "epicPath": "00-epic-plan/cost-ledger.md" },  // epic-level ledger, outside the swept scratch folder
   "blockedFilenamePatterns": ["report", "summary", "analysis", "findings"]  // subagent .md names to reject (server-side block)
 }
 ```
+
+### Folder names and epic base (`folders`, `devDir`) — #1183
+
+Two keys let a consumer rename the folders the workflow tools create and read, without forking TPM.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `workflow.folders.tmp` | `"tpm-tmp"` | Per-phase scratch folder. Was a literal `tmp/` before #1183; the new default avoids colliding with a project's own `tmp/`. |
+| `workflow.folders.findings` / `.tools` / `.tests` | `"findings"` / `"tools"` / `"tests"` | The other three per-phase subfolders. |
+| `workflow.devDir` | `"dev"` | The base a **bare** epic name resolves under: `tpm workflow scaffold epic-init foo` creates `dev/foo`. A path with a separator, or an absolute path, is honored as-is. This is a behavior change: a bare `foo` used to create `./foo`. |
+
+Precedence is **config only**: project `config.json` over the built-in default, with the usual user-file layer on top. There is no CLI flag and no env var for either key. `folders` merges shallow (override `tmp` alone and the other three keep their defaults); a non-string `devDir` is ignored and the default is kept. Read them back with `tpm workflow config --get folders` and `tpm workflow config --get devDir` (keys are relative to the `workflow` section).
+
+Who reads them: the scaffolder (`add-phase` / `add-round` create `<phase>/<tmp>/`; the epic-path positional resolves under `devDir`), the composer (the step-zero `source` / `worker-env` lines and the Constraints scratch line name `<tmp>`), the cost ledger (`<dir>/<tmp>/cost-ledger.md` and the `--rollup` scan), and the audit (default scan root is `devDir`; the scratch-in-`findings/` drift check uses `folders.tmp`).
+
+**Exception — the sign-off store does not follow `folders.tmp`.** The gate's tokens live under the fixed literal `tpm-tmp` (`<phase>/tpm-tmp/tpm-signoff/spawn.json`, `<project-root>/tpm-tmp/tpm-signoff/questions.json`) even when `folders.tmp` is overridden. Making it follow the override is tracked as task #1188.
+
+```jsonc
+// .claude/claude-tpm/config.json
+{ "workflow": { "folders": { "tmp": "scratchy" }, "devDir": "work" } }
+```
+
+Add `tpm-tmp/` (and your override name, if you set one) to the project `.gitignore`; scratch is disposable.
 
 ### Charters (via `subagentConfigs[].charterFile`)
 A charter is a subagent role's **singular definition of "done."** Charters attach to subagent *types*:

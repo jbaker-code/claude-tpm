@@ -29,18 +29,18 @@ let r = run('tpm-workflow-cost-ledger.js', ['--dir', d1, '--agent', 'a', '--toke
 check('cost append rc 0', r.status === 0);
 r = run('tpm-workflow-cost-ledger.js', ['--dir', d1, '--agent', 'b', '--tokens', '1k'], noSess);
 check('cost blank rc 0', r.status === 0);
-const led = fs.readFileSync(path.join(d1, 'tmp', 'cost-ledger.md'), 'utf8');
+const led = fs.readFileSync(path.join(d1, 'tpm-tmp', 'cost-ledger.md'), 'utf8');
 check('10-col header', /\| Notes \| Session \|/.test(led));
 check('stamped row', /\| session-0012b \|\n/.test(led));
 check('blank row cell', /\| 1,000 \| — \| {2}\| {2}\| {2}\|\n?$/.test(led), JSON.stringify(led.slice(-60)));
 check('summary reads 2 rows', /2 subagent/.test(run('tpm-workflow-cost-ledger.js', ['--dir', d1, '--summary'], noSess).stdout));
 // old 9-col ledger: header upgraded, old rows untouched, still summarised
-const d2 = path.join(tmp, 'p2'); fs.mkdirSync(path.join(d2, 'tmp'), { recursive: true });
+const d2 = path.join(tmp, 'p2'); fs.mkdirSync(path.join(d2, 'tpm-tmp'), { recursive: true });
 const old = '# Cost ledger\n\n| Date | Round / phase | Agent | Role | Model | Tokens | Calls | Verdict | Notes |\n|------|---------------|-------|------|-------|-------:|------:|---------|-------|\n| 2026-01-01 | r | a | b | m | 1,000 | 2 | ok | n |\n';
-fs.writeFileSync(path.join(d2, 'tmp', 'cost-ledger.md'), old);
+fs.writeFileSync(path.join(d2, 'tpm-tmp', 'cost-ledger.md'), old);
 check('old ledger summary', /1 subagent/.test(run('tpm-workflow-cost-ledger.js', ['--dir', d2, '--summary'], noSess).stdout));
 run('tpm-workflow-cost-ledger.js', ['--dir', d2, '--agent', 'z', '--tokens', '2k'], noSess);
-const up = fs.readFileSync(path.join(d2, 'tmp', 'cost-ledger.md'), 'utf8');
+const up = fs.readFileSync(path.join(d2, 'tpm-tmp', 'cost-ledger.md'), 'utf8');
 check('old header upgraded', /\| Notes \| Session \|\n\|[-:|]+---------\|\n/.test(up));
 check('old row untouched', up.includes('| 2026-01-01 | r | a | b | m | 1,000 | 2 | ok | n |\n'));
 check('bad --session exit 2', run('tpm-workflow-cost-ledger.js', ['--dir', d2, '--session', 'zz'], noSess).status === 2);
@@ -49,12 +49,12 @@ check('bad --session exit 2', run('tpm-workflow-cost-ledger.js', ['--dir', d2, '
 const proj = path.join(tmp, 'proj'); fs.mkdirSync(path.join(proj, '.claude', 'claude-tpm'), { recursive: true });
 r = run('tpm-workflow-signoff.js', ['questions'], withSess, proj);
 check('signoff rc 0', r.status === 0);
-const tokFile = (n) => JSON.parse(fs.readFileSync(path.join(proj, 'tmp', 'tpm-signoff', n), 'utf8'));
+const tokFile = (n) => JSON.parse(fs.readFileSync(path.join(proj, 'tpm-tmp', 'tpm-signoff', n), 'utf8'));
 let t = tokFile('questions.json');
 check('token tpmSession', t.tpmSession === 'session-0012b' && t.tpmSessionVia === 'lookup' && t.session === undefined && t.sessionId === 'fake-id-1');
 const proj2 = path.join(tmp, 'proj2'); fs.mkdirSync(path.join(proj2, '.claude', 'claude-tpm'), { recursive: true });
 check('signoff blank rc 0', run('tpm-workflow-signoff.js', ['questions'], noSess, proj2).status === 0);
-t = JSON.parse(fs.readFileSync(path.join(proj2, 'tmp', 'tpm-signoff', 'questions.json'), 'utf8'));
+t = JSON.parse(fs.readFileSync(path.join(proj2, 'tpm-tmp', 'tpm-signoff', 'questions.json'), 'utf8'));
 check('token keys omitted when blank', !('tpmSession' in t) && !('tpmSessionVia' in t));
 check('signoff bad --session exit 2', run('tpm-workflow-signoff.js', ['questions', '--session', 'zz'], noSess, proj2).status === 2);
 

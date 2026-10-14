@@ -214,7 +214,20 @@ function identitySlug(opts) {
   return s;
 }
 
+/** #1183: the configured scratch-folder name (workflow.folders.tmp, default `tpm-tmp`). Never throws. */
+function resolveTmpName(opts) {
+  try {
+    const cr = require('./tpm-workflow-config-resolver.js');
+    const r = cr.resolveConfig(undefined, { startDir: opts.projectRoot || undefined }).resolved;
+    if (r && r.folders && typeof r.folders.tmp === 'string' && r.folders.tmp) return r.folders.tmp;
+    return cr.getDefaults().folders.tmp;
+  } catch (_e) {
+    return 'tpm-tmp';
+  }
+}
+
 function compose(opts) {
+  const tmpName = opts.tmpName || resolveTmpName(opts);
   const role = String(opts.role);
   const ROLE = role.toUpperCase();
   const isBugFixer = role.toLowerCase() === 'bug-fixer';
@@ -248,8 +261,8 @@ function compose(opts) {
     L.push('Step zero — source the task env (ONE bash call, anchored at the project root):');
     L.push('```');
     L.push(`cd '${opts.projectRoot}' && \\`);
-    L.push(`  set -a && source '${taskRel}/tmp/subagent.env' && set +a && \\`);
-    L.push(`  env | sort > '${taskRel}/tmp/worker-env.md'`);
+    L.push(`  set -a && source '${taskRel}/${tmpName}/subagent.env' && set +a && \\`);
+    L.push(`  env | sort > '${taskRel}/${tmpName}/worker-env.md'`);
     L.push('```');
     L.push('');
   }
@@ -284,7 +297,7 @@ function compose(opts) {
   L.push('');
 
   // Constraints (standing boilerplate).
-  L.push(`Constraints: write ONLY inside the working folder above; zero external deps; portable \`node <file>\`; scratch → \`tmp/${slug}/\`; never name a file report/summary/analysis/findings (server-side blocked).`);
+  L.push(`Constraints: write ONLY inside the working folder above; zero external deps; portable \`node <file>\`; scratch → \`${tmpName}/${slug}/\`; never name a file report/summary/analysis/findings (server-side blocked).`);
   L.push('');
 
   // Return-shape (role-conditional - matches the charter posture above).
@@ -334,4 +347,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { parseArgs, compose, identitySlug, profileFor, ROLE_PROFILES, NEUTRAL_PROFILE };
+module.exports = { parseArgs, compose, resolveTmpName, identitySlug, profileFor, ROLE_PROFILES, NEUTRAL_PROFILE };
