@@ -139,7 +139,7 @@ folder (`tpm-tmp/<slug>/`) and, for a verifier, the verdict filename
 (`findings/<slug>-verdict.md`). Verified: `--role verifier --round 1 --variant 2` →
 `tpm-tmp/verifier-r1-v2/` and `findings/verifier-r1-v2-verdict.md`.
 
-**The scratch folder name is configurable (#1183).** `tpm-tmp` is the default of `workflow.folders.tmp` (see `docs/config-guide.md` §2). The composer reads that key from the project config at `--project-root` and uses it in all three places it names the scratch folder: the step-zero `source '<phase>/<tmp>/subagent.env'` line, the `> '<phase>/<tmp>/worker-env.md'` line, and the Constraints `scratch → <tmp>/<slug>/` line. With `{"workflow":{"folders":{"tmp":"scratchy"}}}` in `<root>/.claude/claude-tpm/config.json`, all three read `scratchy`. A missing or malformed config falls back to `tpm-tmp`; it never errors. The step-zero paths stay single-quoted (they can contain spaces).
+**The scratch folder name is configurable (#1183).** `tpm-tmp` is the default of `workflow.folders.tmp` (see `docs/config-guide.md` §2). The composer reads that key from the project config at `--project-root` and uses it in both places it names the scratch folder: the step-zero `source '<phase>/<tmp>/subagent.env'` line and the Constraints `scratch → <tmp>/<slug>/` line. With `{"workflow":{"folders":{"tmp":"scratchy"}}}` in `<root>/.claude/claude-tpm/config.json`, both read `scratchy`. A missing or malformed config falls back to `tpm-tmp`; it never errors. The step-zero paths stay single-quoted (they can contain spaces).
 
 ---
 

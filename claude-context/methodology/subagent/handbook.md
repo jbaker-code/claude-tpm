@@ -12,25 +12,24 @@
 
 ---
 
-## Step zero — always source your env, always dump your env file
+## Step zero — always source your env
 
-Before anything else — before reading a single doc — every subagent runs the source + dump in ONE bash tool call, from the PROJECT ROOT:
+Before anything else — before reading a single doc — every subagent sources its task env in ONE bash tool call, from the PROJECT ROOT:
 
 ```bash
 cd "<ABSOLUTE_PROJECT_ROOT>" && \
-  set -a && source "dev/<your-task>/tpm-tmp/subagent.env" && set +a && \
-  env | sort > "dev/<your-task>/tpm-tmp/worker-env.md"
+  set -a && source "dev/<your-task>/tpm-tmp/subagent.env" && set +a
 ```
 
 **Substitute `<your-task>`** with your actual task path (from your spawn prompt's "Working folder" line). The example above shows `dev/<your-task>/` — one real invocation might be `dev/tooling/tmptest1/`.
 
 **The scratch folder name is configurable.** `tpm-tmp` is the default of `workflow.folders.tmp`; the composer emits the resolved name in your spawn prompt, so treat the `tpm-tmp/` paths in these docs as illustrative and use the one your prompt gives you.
 
-**Dump filename by role:** workers write `tpm-tmp/worker-env.md`; verifiers write `tpm-tmp/verifier<N>-env.md` using the verifier number from their spawn prompt (e.g. `tpm-tmp/verifier5-env.md`). Both live in the task's `tpm-tmp/` — they are diagnostics, not findings, and **everything under the task's `tpm-tmp/` will be deleted and lost after the round is reviewed.**
+> **Do not dump the environment to a file.** This ritual used to end with `env | sort > …/worker-env.md` as a debug receipt. Claude Code's auto-mode permission classifier now refuses whole-environment dumps to disk as credential materialization — and it reads spawn-prompt text, so even an instruction to do it blocks the spawn. Never reach for `env >`, `printenv >`, `set >`, or an equivalent. If you must prove the source landed, print variable **names** only (`env | cut -d= -f1 | sort`) or check specific vars with `[ -n "${VAR:-}" ]`; never write values to disk or the transcript.
 
 **Two rules that trip subagents:**
 
-1. **This MUST be a single Bash tool invocation.** Each Bash tool call spawns a fresh shell — env vars set in one call do NOT persist to the next. Chain with `&&` or `;`, keep it one call. Splitting produces an empty env dump and every subsequent tool call that reads env vars fails silently.
+1. **This MUST be a single Bash tool invocation.** Each Bash tool call spawns a fresh shell — env vars set in one call do NOT persist to the next. Chain with `&&` or `;`, keep it one call. Splitting means the sourced vars are gone by your next call and every subsequent tool call that reads env vars fails silently.
 
 2. **Anchor to the project root, not your task folder.** Nearly every project script is written with project-root-relative paths. If your shell's CWD is `dev/<task>/`, invoking a root-relative tool returns exit 127 (not found). Options:
    - **Preferred:** `cd` to project root at the top of every bash tool call — it's cheap, uniform, and makes every tool invocation just work.
@@ -41,10 +40,9 @@ The project root is `<ABSOLUTE_PROJECT_ROOT>` — run `pwd` in a Bash call to ge
 **Why universally, even for tasks with no live system in scope:**
 
 - `tpm-tmp/subagent.env` is the project's per-subagent env-setup mechanism. It's dropped by the scaffolder on every scaffold — even when no live system is provisioned, a stub file is present, so `source` is always safe.
-- Sourcing FIRST means any project env vars are in scope by the time you touch a tool. Skipping the source because "my task doesn't use the live system" was a real failure mode: one of three parallel subagents read "no live system work" strictly and didn't source, producing a divergent env dump. This ritual removes that ambiguity: source unconditionally.
-- Dumping `env` to `tpm-tmp/worker-env.md` (or `tpm-tmp/verifier<N>-env.md`) is a diagnostic artifact — the orchestrator (and future-you) can see exactly what env the subagent operated under. Trivial to write; invaluable when debugging "why didn't your tool call work?" or "why did you use the wrong endpoint?"
+- Sourcing FIRST means any project env vars are in scope by the time you touch a tool. Skipping the source because "my task doesn't use the live system" was a real failure mode: one of three parallel subagents read "no live system work" strictly and didn't source, operating under a divergent env. This ritual removes that ambiguity: source unconditionally.
 
-**When `tpm-tmp/subagent.env` is a stub** (no live-system flags at scaffold time): `source` still works, the env dump still lands, no project-specific vars appear. That's the expected state when your round doesn't need a live system; nothing is broken. If a subagent later needs live-system access, the orchestrator re-scaffolds with the project's live-system flags and the env file gets replaced.
+**When `tpm-tmp/subagent.env` is a stub** (no live-system flags at scaffold time): `source` still works, no project-specific vars appear. That's the expected state when your round doesn't need a live system; nothing is broken. If a subagent later needs live-system access, the orchestrator re-scaffolds with the project's live-system flags and the env file gets replaced.
 
 ---
 

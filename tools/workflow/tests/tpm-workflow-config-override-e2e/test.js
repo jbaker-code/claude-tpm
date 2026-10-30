@@ -41,7 +41,8 @@ const c = run(COMPOSE, ['--role', 'builder', '--phase-dir', phaseDir, '--plan', 
   '--charter', 'charter-builder.md', '--project-root', root], root);
 check(c.code === 0, '(a) composer exits 0');
 check(c.out.includes(`source '${path.join(phaseDir, TMP, 'subagent.env')}'`), '(a) step-zero source line uses overridden tmp, single-quoted');
-check(c.out.includes(`> '${path.join(phaseDir, TMP, 'worker-env.md')}'`), '(a) worker-env line uses overridden tmp, single-quoted');
+// Step-zero env dump is commented out in the composer (auto-mode classifier blocks whole-env dumps to disk). Re-enable if the dump returns:
+// check(c.out.includes(`> '${path.join(phaseDir, TMP, 'worker-env.md')}'`), '(a) worker-env line uses overridden tmp, single-quoted');
 check(c.out.includes(`scratch → \`${TMP}/builder/\``), '(a) Constraints scratch line uses overridden tmp');
 check(!c.out.includes('tpm-tmp'), '(a) no default tpm-tmp leaks into the composed prompt');
 

@@ -113,7 +113,6 @@ explicit:
 |---|---|---|
 | Evidence produced FOR a downstream check (capture bundles, captured evidence) | task `tpm-tmp/captures/`, `tpm-tmp/verification/` | disposable |
 | Verifier scratch (intermediate diffs, exploratory renders, working notes) | task `tpm-tmp/verification/` | disposable |
-| Env dump | task `tpm-tmp/worker-env.md` / `tpm-tmp/verifier<N>-env.md` | disposable |
 | A verifier's verdict / findings | `findings/` (per your folder-hygiene rule) | durable |
 | Proof-of-claim evidence the round ships (final before/after captures, the decisive diff) | `findings/verification/` | durable |
 | Capture bundles the plan names as deliverables | `findings/captures/` | durable |

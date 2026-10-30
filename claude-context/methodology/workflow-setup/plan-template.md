@@ -106,7 +106,7 @@ independent of the task-specific list above:
 
 **Durable vs disposable — `findings/` is saved, `tpm-tmp/` is deleted.** Everything under `findings/` is a git-saved
 artifact this round is accountable for; **everything under `tpm-tmp/` WILL BE DELETED after review.** Put all
-scratch, intermediates, and verification handoff material under `tpm-tmp/` (your env dump → `tpm-tmp/worker-env.md`);
+scratch, intermediates, and verification handoff material under `tpm-tmp/`;
 never invent scratch homes inside `findings/`. If a `tpm-tmp/` file turns out to be load-bearing for a claim, move
 it into `findings/` before you return — prose about deleted evidence is not evidence.
 

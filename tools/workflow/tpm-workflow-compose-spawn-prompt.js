@@ -261,8 +261,16 @@ function compose(opts) {
     L.push('Step zero — source the task env (ONE bash call, anchored at the project root):');
     L.push('```');
     L.push(`cd '${opts.projectRoot}' && \\`);
-    L.push(`  set -a && source '${taskRel}/${tmpName}/subagent.env' && set +a && \\`);
-    L.push(`  env | sort > '${taskRel}/${tmpName}/worker-env.md'`);
+    // Step zero used to end by dumping the whole environment to a file
+    // (`env | sort > <tmp>/worker-env.md`) as a debug receipt. That line is commented out
+    // below: Claude Code's auto-mode permission classifier refuses whole-environment dumps
+    // to disk as credential materialization, and it inspects the spawn prompt's text, so
+    // merely emitting the line now blocks the subagent spawn entirely. The source ritual
+    // stays (projects inject per-subagent vars such as one-off MCP server ports through
+    // subagent.env); only the diagnostic dump is dropped. To restore the diagnostic, re-add
+    // a value-free form that prints variable names only, never values.
+    L.push(`  set -a && source '${taskRel}/${tmpName}/subagent.env' && set +a`);
+    // L.push(`  env | sort > '${taskRel}/${tmpName}/worker-env.md'`);
     L.push('```');
     L.push('');
   }
